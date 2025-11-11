@@ -307,6 +307,9 @@ def main(argv):
         image_length, start = 15, 0
     elif args.data_name == "GF1":
         image_length, start = 4, 0
+    elif args.data_name == "single_image":
+        image_length, start = 1, 0
+    
     # Initialize GUI if requested
     gui = None
     gui_thread = None
@@ -329,6 +332,8 @@ def main(argv):
             image_path = Path(args.dataset) / f'Human_Heart_{i}.png'
         elif args.data_name == "GF1":
             image_path = Path(args.dataset) / f'GF1_{i}.png'
+        elif args.data_name == "single_image":
+            image_path = Path(args.dataset)
 
         torch.cuda.empty_cache()
         trainer = SimpleTrainer2d(image_path=image_path, log_path=log_path, num_points=args.num_points, 
@@ -345,16 +350,19 @@ def main(argv):
         logwriter.write("{}: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
             image_name, trainer.H, trainer.W, psnr, ms_ssim, training_time, eval_time, eval_fps))
 
-    avg_psnr = torch.tensor(psnrs).mean().item()
-    avg_ms_ssim = torch.tensor(ms_ssims).mean().item()
-    avg_training_time = torch.tensor(training_times).mean().item()
-    avg_eval_time = torch.tensor(eval_times).mean().item()
-    avg_eval_fps = torch.tensor(eval_fpses).mean().item()
-    avg_h = image_h//image_length
-    avg_w = image_w//image_length
+    # Only compute averages if multiple images
+    if image_length > 1:
+        avg_psnr = torch.tensor(psnrs).mean().item()
+        avg_ms_ssim = torch.tensor(ms_ssims).mean().item()
+        avg_training_time = torch.tensor(training_times).mean().item()
+        avg_eval_time = torch.tensor(eval_times).mean().item()
+        avg_eval_fps = torch.tensor(eval_fpses).mean().item()
+        avg_h = image_h//image_length
+        avg_w = image_w//image_length
 
-    logwriter.write("Average: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
-        avg_h, avg_w, avg_psnr, avg_ms_ssim, avg_training_time, avg_eval_time, avg_eval_fps))    
+        logwriter.write("Average: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
+            avg_h, avg_w, avg_psnr, avg_ms_ssim, avg_training_time, avg_eval_time, avg_eval_fps))
+
     # Post-training: keep responding to GUI render requests until window closes
     if gui_thread and gui:
         while gui_thread.is_alive():
