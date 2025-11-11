@@ -4,7 +4,8 @@ from utils import *
 import torch
 import torch.nn as nn
 import math
-from optimizer import Adan
+# from optimizer import Adan
+from adan import Adan
 
 class LIG(nn.Module):
     def __init__(self, loss_type="L2", **kwargs):
@@ -32,7 +33,7 @@ class LIG(nn.Module):
                 for i in range(s):
                     num_points -= int(kwargs["num_points"] * pow(2.0, (-self.n_scales + i + 1)*2) * self.allo_ratio)
 
-            self.level_models.append(Gaussian2D(loss_type="L2", opt_type=kwargs['opt_type'], num_points=num_points, 
+            self.level_models.append(Gaussian2D(loss_type=self.loss_type, opt_type=kwargs['opt_type'], num_points=num_points,
                                                    H=H, W=W, BLOCK_H=kwargs['BLOCK_H'], BLOCK_W=kwargs['BLOCK_W'],
                                                    device=kwargs['device'], lr=kwargs['lr']))
 
@@ -62,9 +63,17 @@ class Gaussian2D(nn.Module):
         self.rgbs.requires_grad = True
 
         if kwargs["opt_type"] == "adam":
-            self.optimizer = torch.optim.Adam([self.rgbs, self.means, self.cov2d], lr=kwargs["lr"])
+            self.optimizer = torch.optim.Adam([
+                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self.means, 'lr': kwargs["lr"] * 2},
+                {'params': self.cov2d, 'lr': kwargs["lr"] * 5}
+            ])
         else:
-            self.optimizer = Adan([self.rgbs, self.means, self.cov2d], lr=kwargs["lr"])
+            self.optimizer = Adan([
+                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self.means, 'lr': kwargs["lr"] * 2},
+                {'params': self.cov2d, 'lr': kwargs["lr"] * 5}
+            ], fused=True)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=70000, gamma=0.7)
 
     def forward(self):
