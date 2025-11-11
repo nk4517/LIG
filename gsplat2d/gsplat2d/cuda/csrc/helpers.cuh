@@ -75,3 +75,13 @@ inline __device__ void cov2d_to_conic_vjp(
     v_cov2d.y = v_Sigma[1][0] + v_Sigma[0][1];
     v_cov2d.z = v_Sigma[1][1];
 }
+
+inline __host__ __device__ float3 operator*(float3 a, float b) {
+    return make_float3(a.x * b, a.y * b, a.z * b);
+}
+
+inline __host__ __device__ void operator+=(float3 &a, float3 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+}
