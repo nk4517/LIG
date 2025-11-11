@@ -76,6 +76,10 @@ class LIGVisualizer:
         self.program = None
         self.vao = None
         
+        # Дополнительные текстуры для градиентов
+        self.texture_dx = None
+        self.texture_dy = None
+        self.texture_dxy = None
         self.upscale_program = None
         
         # Flag for visualization updates
@@ -94,6 +98,7 @@ class LIGVisualizer:
         # Флаги для апскейлинга
         self.use_upscale_shader = False
         self.upscale_factor = 2
+        self.use_gradient_shader = False
         
     def init(self):
         if not glfw.init():
@@ -127,10 +132,12 @@ class LIGVisualizer:
         shader_dir = Path(__file__).parent / "shaders"
         vertex_source = load_shader(shader_dir / "fullscreen.vert")
         texture_fragment = load_shader(shader_dir / "texture.frag")
+        gradient_fragment = load_shader(shader_dir / "gradient.frag")
         upscale_fragment = load_shader(shader_dir / "upscale.frag")
         
         self.program = compile_shaders(vertex_source, texture_fragment)
         self.upscale_program = compile_shaders(vertex_source, upscale_fragment)
+        self.gradient_program = compile_shaders(vertex_source, gradient_fragment)
         self.vao = gl.glGenVertexArrays(1)
         
         self.texture = gl.glGenTextures(1)
@@ -266,38 +273,27 @@ class LIGVisualizer:
         self.current_loss = loss
         
     def _prepare_gradient_data(self, gradient):
-        """Prepare gradient tensor for visualization with red-blue colormap"""
+        """Prepare gradient tensor for visualization - just normalize and convert to RGBA"""
         # Handle different tensor dimensions
         if gradient.dim() == 4:
             gradient = gradient.squeeze(0)
         
         if gradient.dim() == 3:
-            # Average across channels (CHW -> HW)
-            gradient = gradient.mean(dim=0)
-        
-        # Use quantiles for robust normalization, symmetric around zero
-        q_low = torch.quantile(gradient.flatten(), 0.01)
-        q_high = torch.quantile(gradient.flatten(), 0.99)
-        
-        # Make symmetric around zero
-        max_abs = max(abs(q_low), abs(q_high))
-        
-        if max_abs > 1e-6:
-            gradient_norm = torch.clamp(gradient / max_abs, -1.0, 1.0)
+            # CHW to HWC
+            gradient = gradient.permute(1, 2, 0)
         else:
-            gradient_norm = torch.zeros_like(gradient)
+            # Single channel - replicate to RGB
+            gradient = gradient.unsqueeze(-1)
+            gradient = gradient.repeat(1, 1, 3)
         
-        # Create red-blue colormap
-        # Negative values -> blue, positive values -> red
-        red = torch.clamp(gradient_norm, 0, 1)
-        blue = torch.clamp(-gradient_norm, 0, 1)
-        green = torch.zeros_like(gradient_norm)
-        alpha = torch.ones_like(gradient_norm)
+        # Add alpha channel
+        if gradient.shape[2] == 3:
+            alpha = torch.ones((*gradient.shape[:2], 1), 
+                              dtype=gradient.dtype, 
+                              device=gradient.device)
+            gradient = torch.cat([gradient, alpha], dim=2)
         
-        # Stack into RGBA tensor
-        image_tensor = torch.stack([red, green, blue, alpha], dim=-1)
-        
-        return image_tensor
+        return gradient
         
     def _prepare_render_data(self, rendered):
         """Prepare rendered tensor for texture update"""
@@ -452,6 +448,24 @@ class LIGVisualizer:
                        gl.GL_RGBA, gl.GL_FLOAT, dxy_np)
         
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+    
+    def _prepare_gradient_tensor(self, gradient):
+        """Подготовка тензора градиента для текстуры"""
+        if gradient.dim() == 4:
+            gradient = gradient.squeeze(0)
+        
+        if gradient.dim() == 3:
+            # CHW -> HWC
+            gradient = gradient.permute(1, 2, 0)
+        
+        # Добавляем альфа-канал если нужно
+        if gradient.shape[2] == 3:
+            alpha = torch.ones((*gradient.shape[:2], 1),
+                              dtype=gradient.dtype,
+                              device=gradient.device)
+            gradient = torch.cat([gradient, alpha], dim=2)
+        
+        return gradient
         
     def main_loop(self):
         while not glfw.window_should_close(self.window):
@@ -492,92 +506,56 @@ class LIGVisualizer:
                                         image_tensor = self._prepare_render_data(display_tensor)
                                     elif self.vis_mode == 1 and dx is not None:
                                         display_tensor = dx.float()
-                                        # Use gradient visualization for derivatives
+                                        # Use gradient visualization shader
                                         image_tensor = self._prepare_gradient_data(display_tensor)
+                                        self._update_texture(image_tensor)
+                                        self.use_gradient_shader = True
                                     elif self.vis_mode == 2 and dy is not None:
                                         display_tensor = dy.float()
-                                        # Use gradient visualization for derivatives
+                                        # Use gradient visualization shader
                                         image_tensor = self._prepare_gradient_data(display_tensor)
+                                        self._update_texture(image_tensor)
+                                        self.use_gradient_shader = True
                                     elif self.vis_mode == 3 and dxy is not None:
                                         display_tensor = dxy.float()
-                                        # Use gradient visualization for derivatives
+                                        # Use gradient visualization shader
                                         image_tensor = self._prepare_gradient_data(display_tensor)
+                                        self._update_texture(image_tensor)
+                                        self.use_gradient_shader = True
                                     elif self.vis_mode == 4:
-                                        # Upscaled mode - use bicubic spline upscaling
-                                        h, w = rendered.permute(0, 2, 3, 1).shape[1:3]
-                                        scale_factor = 2
-                                        new_h = h * scale_factor
-                                        new_w = w * scale_factor
-                                        
-                                        # Ensure we have derivatives for upscaling
+                                        # Upscaled mode - use GL shader upscaling
                                         if dx is not None and dy is not None and dxy is not None:
-                                            # Process each channel separately to save memory
-                                            channels = []
-                                            rendered_hwc = rendered.squeeze(0).permute(1, 2, 0)  # [H, W, C]
-                                            dx_hwc = dx.squeeze(0).permute(1, 2, 0)
-                                            dy_hwc = dy.squeeze(0).permute(1, 2, 0)
-                                            dxy_hwc = dxy.squeeze(0).permute(1, 2, 0)
+                                            # Обновляем текстуры градиентов
+                                            self._update_gradient_textures(dx, dy, dxy)
                                             
-                                            for c in range(rendered_hwc.shape[2]):
-                                                upscaled_channel = bicubic_spline_upscale_single_channel(
-                                                    rendered_hwc[:, :, c], 
-                                                    dx_hwc[:, :, c], 
-                                                    dy_hwc[:, :, c], 
-                                                    dxy_hwc[:, :, c], 
-                                                    new_h, new_w
-                                                )
-                                                channels.append(upscaled_channel)
+                                            # Обновляем основную текстуру
+                                            display_tensor = rendered
+                                            image_tensor = self._prepare_render_data(display_tensor)
+                                            self._update_texture(image_tensor)
                                             
-                                            # Stack channels back together
-                                            display_tensor = torch.stack(channels, dim=-1)  # [new_h, new_w, C]
-                                            image_tensor = torch.clamp(display_tensor, 0, 1)
-                                            
-                                            # Ensure RGBA
-                                            if image_tensor.shape[2] == 3:
-                                                alpha = torch.ones((*image_tensor.shape[:2], 1),
-                                                                 dtype=image_tensor.dtype,
-                                                                 device=image_tensor.device)
-                                                image_tensor = torch.cat([image_tensor, alpha], dim=2)
+                                            # Флаг для использования upscale шейдера
+                                            self.use_upscale_shader = True
+                                            self.upscale_factor = 2
                                         else:
                                             # Fallback to regular rendering if derivatives not available
                                             display_tensor = rendered
                                             image_tensor = self._prepare_render_data(display_tensor)
+                                            self._update_texture(image_tensor)
+                                            self.use_upscale_shader = False
                                     elif self.vis_mode == 5:
                                         # Upscaled 1:1 pixel perfect mode
-                                        h, w = rendered.permute(0, 2, 3, 1).shape[1:3]
-                                        scale_factor = 3
-                                        new_h = h * scale_factor
-                                        new_w = w * scale_factor
-                                        
-                                        # Ensure we have derivatives for upscaling
                                         if dx is not None and dy is not None and dxy is not None:
-                                            # Process each channel separately to save memory
-                                            channels = []
-                                            rendered_hwc = rendered.squeeze(0).permute(1, 2, 0)  # [H, W, C]
-                                            dx_hwc = dx.squeeze(0).permute(1, 2, 0)
-                                            dy_hwc = dy.squeeze(0).permute(1, 2, 0)
-                                            dxy_hwc = dxy.squeeze(0).permute(1, 2, 0)
+                                            # Обновляем текстуры градиентов
+                                            self._update_gradient_textures(dx, dy, dxy)
                                             
-                                            for c in range(rendered_hwc.shape[2]):
-                                                upscaled_channel = bicubic_spline_upscale_single_channel(
-                                                    rendered_hwc[:, :, c], 
-                                                    dx_hwc[:, :, c], 
-                                                    dy_hwc[:, :, c], 
-                                                    dxy_hwc[:, :, c], 
-                                                    new_h, new_w
-                                                )
-                                                channels.append(upscaled_channel)
+                                            # Обновляем основную текстуру
+                                            display_tensor = rendered
+                                            image_tensor = self._prepare_render_data(display_tensor)
+                                            self._update_texture(image_tensor)
                                             
-                                            # Stack channels back together
-                                            display_tensor = torch.stack(channels, dim=-1)  # [new_h, new_w, C]
-                                            image_tensor = torch.clamp(display_tensor, 0, 1)
-                                            
-                                            # Ensure RGBA
-                                            if image_tensor.shape[2] == 3:
-                                                alpha = torch.ones((*image_tensor.shape[:2], 1),
-                                                                 dtype=image_tensor.dtype,
-                                                                 device=image_tensor.device)
-                                                image_tensor = torch.cat([image_tensor, alpha], dim=2)
+                                            # Флаг для использования upscale шейдера
+                                            self.use_upscale_shader = True
+                                            self.upscale_factor = 3
                                             self.pixel_perfect = True
                                         else:
                                             # Fallback to regular rendering if derivatives not available
@@ -653,6 +631,21 @@ class LIGVisualizer:
                     
                     # Сбрасываем флаг после использования
                     self.use_upscale_shader = False
+                elif self.use_gradient_shader:
+                    gl.glUseProgram(self.gradient_program)
+                    gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "pan"), self.pan_x, self.pan_y)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "zoom"), self.zoom)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "window_aspect"), self.aspect)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "image_aspect"), self.image_aspect)
+                    gl.glUniform1i(gl.glGetUniformLocation(self.gradient_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+                    gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "window_size"), float(self.width), float(self.height))
+                    gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "texture_size"), float(self.image_width), float(self.image_height))
+                    
+                    gl.glActiveTexture(gl.GL_TEXTURE0)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
+                    
+                    # Сбрасываем флаг после использования
+                    self.use_gradient_shader = False
                 else:
                     gl.glUseProgram(self.program)
                     gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), self.pan_x, self.pan_y)
