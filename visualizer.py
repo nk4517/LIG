@@ -45,10 +45,27 @@ uniform vec2 pan;
 uniform float zoom;
 uniform float window_aspect;
 uniform float image_aspect;
+uniform int pixel_perfect;  // 0=normal, 1=pixel perfect
+uniform vec2 window_size;
+uniform vec2 texture_size;
 
 void main()
 {
-    vec2 centered = (texcoords - vec2(0.5));
+    vec2 uv;
+    
+    if (pixel_perfect == 1) {
+        // Pixel-perfect mode - map screen pixels directly to texture pixels
+        vec2 screen_pos = texcoords * window_size;
+        vec2 center_offset = (window_size - texture_size) * 0.5;
+        vec2 tex_pos = screen_pos - center_offset;
+        
+        // Apply pan in pixel space
+        tex_pos -= pan * texture_size;
+        
+        uv = tex_pos / texture_size;
+    } else {
+        // Normal mode with aspect correction
+        vec2 centered = (texcoords - vec2(0.5));
     
     // Correct for window aspect ratio to maintain image aspect ratio
     float scale_x = 1.0;
@@ -65,7 +82,9 @@ void main()
     centered.x *= scale_x;
     centered.y *= scale_y;
     
-    vec2 uv = centered / zoom + vec2(0.5) + pan;
+        uv = centered / zoom + vec2(0.5) + pan;
+    }
+    
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         outputColour = vec4(0.2, 0.2, 0.2, 1.0);
     } else {
@@ -138,6 +157,8 @@ class LIGVisualizer:
         self.current_iter = 0
         self.current_psnr = 0.0
         self.current_loss = 0.0
+        
+        self.pixel_perfect = False  # Flag for pixel-perfect rendering
         
     def init(self):
         if not glfw.init():
@@ -440,6 +461,9 @@ class LIGVisualizer:
                 gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), self.zoom)
                 gl.glUniform1f(gl.glGetUniformLocation(self.program, "window_aspect"), self.aspect)
                 gl.glUniform1f(gl.glGetUniformLocation(self.program, "image_aspect"), self.image_aspect)
+                gl.glUniform1i(gl.glGetUniformLocation(self.program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+                gl.glUniform2f(gl.glGetUniformLocation(self.program, "window_size"), float(self.width), float(self.height))
+                gl.glUniform2f(gl.glGetUniformLocation(self.program, "texture_size"), float(self.image_width), float(self.image_height))
                 
                 gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
                 gl.glBindVertexArray(self.vao)
