@@ -60,6 +60,7 @@ class LIGVisualizer:
         self.pan_y = 0.0
         self.zoom = 1.0
         self.aspect = 1.0
+        self.fit_to_window = True  # Автоподстройка зума под размер окна
         
         self.is_panning = False
         self.last_mouse_x = 0
@@ -90,18 +91,15 @@ class LIGVisualizer:
         self.current_psnr = 0.0
         self.current_loss = 0.0
         
-        # Visualization mode: 0=render, 1=dx, 2=dy, 3=dxy
+        # Visualization mode: 0=render, 1=dx, 2=dy, 3=dxy, 4=upscaled, 5=magnitude
         self.vis_mode = 0
-        self.vis_mode_names = ["Render", "dX", "dY", "dXY", "Upscaled"]
+        self.vis_mode_names = ["Render", "dX", "dY", "dXY", "Upscaled", "Magnitude"]
         self.pixel_perfect = False  # Flag for pixel-perfect rendering
         
         # Флаги для апскейлинга
         self.use_upscale_shader = False
-        self.upscale_factor = 2
         self.use_gradient_shader = False
-        
-        # Upscale settings
-        self.upscale_factor_setting = 2.0
+        self.use_magnitude_shader = False
         
     def init(self):
         if not glfw.init():
@@ -137,10 +135,12 @@ class LIGVisualizer:
         texture_fragment = load_shader(shader_dir / "texture.frag")
         gradient_fragment = load_shader(shader_dir / "gradient.frag")
         upscale_fragment = load_shader(shader_dir / "upscale.frag")
+        magnitude_fragment = load_shader(shader_dir / "magnitude.frag")
         
         self.program = compile_shaders(vertex_source, texture_fragment)
         self.upscale_program = compile_shaders(vertex_source, upscale_fragment)
         self.gradient_program = compile_shaders(vertex_source, gradient_fragment)
+        self.magnitude_program = compile_shaders(vertex_source, magnitude_fragment)
         self.vao = gl.glGenVertexArrays(1)
         
         self.texture = gl.glGenTextures(1)
@@ -197,6 +197,17 @@ class LIGVisualizer:
         self.aspect = width / height if height > 0 else 1.0
         gl.glViewport(0, 0, width, height)
         
+        # Пересчитываем zoom если включен fit_to_window
+        if self.fit_to_window and self.image_width > 0 and self.image_height > 0:
+            window_aspect = self.width / self.height if self.height > 0 else 1.0
+            image_aspect = self.image_width / self.image_height if self.image_height > 0 else 1.0
+            
+            # Вычисляем базовый zoom чтобы изображение поместилось в окно
+            zoom_x = self.width / float(self.image_width)
+            zoom_y = self.height / float(self.image_height)
+            # Берём минимальный zoom чтобы изображение гарантированно поместилось
+            self.zoom = min(zoom_x, zoom_y)
+        
     def cursor_pos_callback(self, window, xpos, ypos):
         if imgui.get_io().want_capture_mouse:
             self.is_panning = False
@@ -206,24 +217,9 @@ class LIGVisualizer:
             dx = xpos - self.last_mouse_x
             dy = ypos - self.last_mouse_y
             
-            # Calculate aspect ratio correction (same as in shader)
-            window_aspect = self.width / self.height if self.height > 0 else 1.0
-            
-            scale_x = 1.0
-            scale_y = 1.0
-            
-            if window_aspect > self.image_aspect:
-                # Window is wider than image - scale x
-                scale_x = window_aspect / self.image_aspect
-            else:
-                # Window is taller than image - scale y
-                scale_y = self.image_aspect / window_aspect
-            
-            # Convert pixel movement to UV space with aspect correction
-            # Negative dx because moving mouse right should show content to the right (pan left)
-            # Negative dy for correct vertical movement
-            self.pan_x -= (dx / self.width) * scale_x / self.zoom
-            self.pan_y -= (dy / self.height) * scale_y / self.zoom
+            # Pan хранится в пикселях окна
+            self.pan_x -= dx
+            self.pan_y -= dy
             
         self.last_mouse_x = xpos
         self.last_mouse_y = ypos
@@ -239,6 +235,13 @@ class LIGVisualizer:
         if imgui.get_io().want_capture_mouse:
             return
         
+        # В режиме pixel perfect zoom зафиксирован на 1.0
+        if self.pixel_perfect:
+            return
+        
+        # При ручном изменении зума отключаем fit_to_window
+        self.fit_to_window = False
+        
         zoom_speed = 1.1
         if yoffset > 0:
             self.zoom *= zoom_speed
@@ -251,9 +254,20 @@ class LIGVisualizer:
             if key == glfw.KEY_R:  # Reset view
                 self.pan_x = 0.0
                 self.pan_y = 0.0
-                self.zoom = 1.0
-            elif key >= glfw.KEY_1 and key <= glfw.KEY_5:
-                # Switch visualization mode with keys 1-5
+                # Если fit_to_window включен - пересчитываем zoom, иначе сбрасываем на 1.0
+                if self.fit_to_window and self.image_width > 0 and self.image_height > 0:
+                    window_aspect = self.width / self.height if self.height > 0 else 1.0
+                    image_aspect = self.image_width / self.image_height if self.image_height > 0 else 1.0
+                    
+                    # Вычисляем базовый zoom чтобы изображение поместилось в окно
+                    zoom_x = self.width / float(self.image_width)
+                    zoom_y = self.height / float(self.image_height)
+                    # Берём минимальный zoom чтобы изображение гарантированно поместилось
+                    self.zoom = min(zoom_x, zoom_y)
+                else:
+                    self.zoom = 1.0
+            elif key >= glfw.KEY_1 and key <= glfw.KEY_6:
+                # Switch visualization mode with keys 1-6
                 self.vis_mode = key - glfw.KEY_1
             elif key == glfw.KEY_ESCAPE:
                 glfw.set_window_should_close(self.window, True)
@@ -334,6 +348,15 @@ class LIGVisualizer:
         self.image_width = w
         self.image_height = h
         self.image_aspect = w / h if h > 0 else 1.0
+        
+        # Если включен fit_to_window - пересчитываем zoom
+        if self.fit_to_window:
+            window_aspect = self.width / self.height if self.height > 0 else 1.0
+            # Вычисляем базовый zoom чтобы изображение поместилось в окно
+            zoom_x = self.width / float(w) if w > 0 else 1.0
+            zoom_y = self.height / float(h) if h > 0 else 1.0
+            # Берём минимальный zoom чтобы изображение гарантированно поместилось
+            self.zoom = min(zoom_x, zoom_y)
         
         if self.use_cuda:
             self._update_texture_cuda(img_tensor, w, h)
@@ -519,13 +542,28 @@ class LIGVisualizer:
                                 image_tensor = self._prepare_render_data(display_tensor)
                                 self._update_texture(image_tensor)
                                 self.use_upscale_shader = True
-                                self.upscale_factor = self.upscale_factor_setting
                             else:
                                 # Fallback to regular rendering if derivatives not available
                                 display_tensor = rendered
                                 image_tensor = self._prepare_render_data(display_tensor)
                                 self._update_texture(image_tensor)
                                 self.use_upscale_shader = False
+                        elif self.vis_mode == 5:
+                            # Magnitude mode - compute gradient magnitude
+                            if dx is not None and dy is not None:
+                                # Update gradient textures for magnitude shader
+                                self._update_gradient_textures(dx, dy, dxy if dxy is not None else dx)
+                                # Use rendered image for texture (not used in magnitude shader but needed for consistency)
+                                display_tensor = rendered
+                                image_tensor = self._prepare_render_data(display_tensor)
+                                self._update_texture(image_tensor)
+                                self.use_magnitude_shader = True
+                            else:
+                                # Fallback to regular rendering if derivatives not available
+                                display_tensor = rendered
+                                image_tensor = self._prepare_render_data(display_tensor)
+                                self._update_texture(image_tensor)
+                                self.use_magnitude_shader = False
                         else:
                             display_tensor = rendered
                             # Fallback to regular rendering
@@ -556,13 +594,10 @@ class LIGVisualizer:
             gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "source_size"), 
                           float(self.image_width), float(self.image_height))
             gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "target_size"), 
-                          float(self.image_width * self.upscale_factor), 
-                          float(self.image_height * self.upscale_factor))
-            gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "pan"), self.pan_x, self.pan_y)
+                          float(self.image_width * self.zoom), 
+                          float(self.image_height * self.zoom))
+            gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "pan"), float(self.pan_x), float(self.pan_y))
             gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "zoom"), self.zoom)
-            gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "window_aspect"), self.aspect)
-            gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "image_aspect"), self.image_aspect)
-            gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
             gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "window_size"), float(self.width), float(self.height))
             
             # Привязываем текстуры
@@ -584,13 +619,30 @@ class LIGVisualizer:
             
             # Сбрасываем флаг после использования
             self.use_upscale_shader = False
+        elif self.use_magnitude_shader:
+            gl.glUseProgram(self.magnitude_program)
+            gl.glUniform2f(gl.glGetUniformLocation(self.magnitude_program, "pan"), float(self.pan_x), float(self.pan_y))
+            # Передаём zoom=1.0 для pixel_perfect, иначе self.zoom
+            gl.glUniform1f(gl.glGetUniformLocation(self.magnitude_program, "zoom"), 1.0 if self.pixel_perfect else self.zoom)
+            gl.glUniform2f(gl.glGetUniformLocation(self.magnitude_program, "window_size"), float(self.width), float(self.height))
+            gl.glUniform2f(gl.glGetUniformLocation(self.magnitude_program, "texture_size"), float(self.image_width), float(self.image_height))
+            
+            # Bind gradient textures
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
+            gl.glUniform1i(gl.glGetUniformLocation(self.magnitude_program, "texDx"), 0)
+            
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
+            gl.glUniform1i(gl.glGetUniformLocation(self.magnitude_program, "texDy"), 1)
+            
+            # Сбрасываем флаг после использования
+            self.use_magnitude_shader = False
         elif self.use_gradient_shader:
             gl.glUseProgram(self.gradient_program)
-            gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "pan"), self.pan_x, self.pan_y)
-            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "zoom"), self.zoom)
-            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "window_aspect"), self.aspect)
-            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "image_aspect"), self.image_aspect)
-            gl.glUniform1i(gl.glGetUniformLocation(self.gradient_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+            gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "pan"), float(self.pan_x), float(self.pan_y))
+            # Передаём zoom=1.0 для pixel_perfect, иначе self.zoom
+            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "zoom"), 1.0 if self.pixel_perfect else self.zoom)
             gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "window_size"), float(self.width), float(self.height))
             gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "texture_size"), float(self.image_width), float(self.image_height))
             
@@ -601,11 +653,9 @@ class LIGVisualizer:
             self.use_gradient_shader = False
         else:
             gl.glUseProgram(self.program)
-            gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), self.pan_x, self.pan_y)
-            gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), self.zoom)
-            gl.glUniform1f(gl.glGetUniformLocation(self.program, "window_aspect"), self.aspect)
-            gl.glUniform1f(gl.glGetUniformLocation(self.program, "image_aspect"), self.image_aspect)
-            gl.glUniform1i(gl.glGetUniformLocation(self.program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+            gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), float(self.pan_x), float(self.pan_y))
+            # Передаём zoom=1.0 для pixel_perfect, иначе self.zoom
+            gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), 1.0 if self.pixel_perfect else self.zoom)
             gl.glUniform2f(gl.glGetUniformLocation(self.program, "window_size"), float(self.width), float(self.height))
             gl.glUniform2f(gl.glGetUniformLocation(self.program, "texture_size"), float(self.image_width), float(self.image_height))
             
@@ -619,13 +669,37 @@ class LIGVisualizer:
             
         # Settings panel - верхний правый угол
         imgui.set_next_window_position(self.width - 320, 10)
-        imgui.set_next_window_size(300, 250)
+        imgui.set_next_window_size(300, 320)
         imgui.begin("Settings")
         
-        # Pixel perfect checkbox
-        changed, self.pixel_perfect = imgui.checkbox("Pixel Perfect", self.pixel_perfect)
+        # Fit to window checkbox
+        changed, self.fit_to_window = imgui.checkbox("Fit to Window", self.fit_to_window)
         if imgui.is_item_hovered():
-            imgui.set_tooltip("Toggle between stretch to window and 1:1 pixel rendering")
+            imgui.set_tooltip("Automatically adjust zoom to fit image in window")
+        
+        # При включении fit_to_window пересчитываем zoom
+        if changed and self.fit_to_window and self.image_width > 0 and self.image_height > 0:
+            window_aspect = self.width / self.height if self.height > 0 else 1.0
+            image_aspect = self.image_width / self.image_height if self.image_height > 0 else 1.0
+            
+            # Вычисляем базовый zoom чтобы изображение поместилось в окно
+            zoom_x = self.width / float(self.image_width)
+            zoom_y = self.height / float(self.image_height)
+            # Берём минимальный zoom чтобы изображение гарантированно поместилось
+            self.zoom = min(zoom_x, zoom_y)
+        
+        imgui.separator()
+        
+        # Pixel perfect checkbox
+        # В режиме upscale pixel-perfect не показывается (он всегда включен внутри)
+        if self.vis_mode != 4:
+            changed, self.pixel_perfect = imgui.checkbox("Pixel Perfect", self.pixel_perfect)
+            # При включении pixel_perfect фиксируем zoom на 1.0
+            if changed and self.pixel_perfect:
+                self.zoom = 1.0
+            
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Toggle between stretch to window and 1:1 pixel rendering")
         
         imgui.separator()
         
@@ -634,30 +708,62 @@ class LIGVisualizer:
         
         if imgui.radio_button("Image [1]", self.vis_mode == 0):
             self.vis_mode = 0
+            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         imgui.same_line()
         if imgui.radio_button("dX [2]", self.vis_mode == 1):
             self.vis_mode = 1
+            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         
         if imgui.radio_button("dY [3]", self.vis_mode == 2):
             self.vis_mode = 2
+            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         imgui.same_line()
         if imgui.radio_button("dXY [4]", self.vis_mode == 3):
             self.vis_mode = 3
+            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         
         if imgui.radio_button("Upscaled [5]", self.vis_mode == 4):
             self.vis_mode = 4
-        
+        imgui.same_line()
+        if imgui.radio_button("Magnitude [6]", self.vis_mode == 5):
+            self.vis_mode = 5
         imgui.separator()
         
-        # Upscale factor slider (only show when in Upscaled mode)
+        # Zoom slider - общий для всех режимов
+        # В режиме upscale показываем как "Upscaler zoom"
         if self.vis_mode == 4:
-            changed, self.upscale_factor_setting = imgui.slider_float(
-                "Upscale Factor", 
-                self.upscale_factor_setting, 
-                0.25, 
-                8.0,
-                "%.2f"
+            display_zoom = self.zoom
+            changed, self.zoom = imgui.slider_float(
+                "Upscaler zoom", 
+                self.zoom, 
+                0.1, 
+                10.0,
+                f"{display_zoom:.2f}x"
             )
+            # При ручном изменении зума отключаем fit_to_window
+            if changed:
+                self.fit_to_window = False
+        # В режиме pixel perfect zoom зафиксирован на 1.0
+        elif self.pixel_perfect:
+            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+            imgui.text(f"Zoom: 1.00x (locked in pixel perfect)")
+            imgui.pop_style_var()
+        else:
+            display_zoom = self.zoom
+            
+            changed, self.zoom = imgui.slider_float(
+                "Zoom", 
+                self.zoom, 
+                0.1, 
+                10.0,
+                f"{display_zoom:.2f}x"
+            )
+            # При ручном изменении зума отключаем fit_to_window
+            if changed:
+                self.fit_to_window = False
+            
+        if imgui.is_item_hovered():
+            imgui.set_tooltip("Zoom level (also controlled by mouse wheel)")
         
         imgui.end()
         
@@ -672,14 +778,26 @@ class LIGVisualizer:
         imgui.text(f"PSNR: {self.current_psnr:.2f} dB")
         imgui.text(f"Loss: {self.current_loss:.6f}")
         imgui.separator()
-        imgui.text(f"Zoom: {self.zoom:.2f}x")
-        imgui.text(f"Pan: ({self.pan_x:.3f}, {self.pan_y:.3f})")
+        # Показываем реальный zoom относительно исходного изображения
+        if self.pixel_perfect:
+            # В режиме pixel perfect zoom всегда 1.0
+            display_zoom = 1.0
+        else:
+            if self.image_width > 0 and self.image_height > 0:
+                window_scale_x = self.width / float(self.image_width)
+                window_scale_y = self.height / float(self.image_height)
+                window_scale = min(window_scale_x, window_scale_y)
+                display_zoom = self.zoom * window_scale
+            else:
+                display_zoom = self.zoom
+        imgui.text(f"Zoom: {display_zoom:.2f}x")
+        imgui.text(f"Pan: ({self.pan_x:.0f}, {self.pan_y:.0f}) px")
         imgui.separator()
         imgui.text("Controls:")
         imgui.text("LMB - Pan")
         imgui.text("Scroll - Zoom")
         imgui.text("R - Reset view")
-        imgui.text("1-5 - Switch view mode")
+        imgui.text("1-6 - Switch view mode")
         imgui.text("ESC - Exit")
         imgui.end()
         
