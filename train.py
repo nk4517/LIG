@@ -1,5 +1,6 @@
 import math
 import time
+import typing
 from pathlib import Path
 import argparse
 import yaml
@@ -14,6 +15,10 @@ from tqdm import tqdm
 import random
 import torchvision.transforms as transforms
 import threading
+
+if typing.TYPE_CHECKING:
+    from visualizer import LIGVisualizer
+
 
 class SimpleTrainer2d:
     """Trains random 2d gaussians to fit an image."""
@@ -42,7 +47,7 @@ class SimpleTrainer2d:
         self.log_dir = Path(log_path + '/' + self.image_name)
         
         # Store GUI reference
-        self.gui = gui
+        self.gui: "LIGVisualizer|None" = gui
 
         if model_name == "LIG":
             from gaussianlig import LIG
@@ -53,7 +58,7 @@ class SimpleTrainer2d:
 
         # Set model in GUI if available
         if self.gui:
-            self.gui.setModel(self.gaussian_model, self.gt_image)
+            self.gui.set_model(self.gaussian_model, self.gt_image)
 
         self.logwriter = LogWriter(self.log_dir)
 
@@ -165,7 +170,11 @@ class SimpleTrainer2d:
                 
                 # Set current model in GUI for multi-scale
                 if self.gui:
-                    self.gui.setModel(self.gaussian_model.level_models[scale_idx], img_target)
+                    # Передаём полную модель и оригинальную картинку
+                    self.gui.set_model(self.gaussian_model, self.gt_image)
+                    # При первом масштабе сохраняем мелкую картинку как референс
+                    if scale_idx == 0:
+                        self.gui.set_target_image(img_target)
                 
                 for iter in range(1, self.iterations+1):
                     # GUI synchronization
@@ -276,7 +285,7 @@ def parse_args(argv):
     parser.add_argument(
         "--num_points",
         type=int,
-        default=150000,
+        default=250000,
         help="2D GS points (default: %(default)s)",
     )
 
