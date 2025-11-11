@@ -1,10 +1,16 @@
 import threading
+import typing
+
 import glfw
 import OpenGL.GL as gl
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 import torch
 from pathlib import Path
+
+if typing.TYPE_CHECKING:
+    from gaussianlig import LIG
+
 
 from LIG.upscaler_torch import bicubic_spline_upscale_single_channel
 
@@ -67,8 +73,9 @@ class LIGVisualizer:
         self.last_mouse_y = 0
         
         # Model and image data
-        self.gaussian_model = None
+        self.gaussian_model: "LIG|None" = None
         self.gt_image = None
+        self.target_image = None  # Для хранения первой мелкой картинки
         self.current_image = None
         self.image_width = 1
         self.image_height = 1
@@ -76,6 +83,14 @@ class LIGVisualizer:
         self.texture = None
         self.program = None
         self.vao = None
+        
+        # Дополнительные текстуры для target и ground truth
+        self.texture_target = None
+        self.texture_gt = None
+        self.target_width = 1
+        self.target_height = 1
+        self.gt_width = 1
+        self.gt_height = 1
         
         # Дополнительные текстуры для градиентов
         self.texture_dx = None
@@ -90,11 +105,13 @@ class LIGVisualizer:
         self.current_iter = 0
         self.current_psnr = 0.0
         self.current_loss = 0.0
+        self.use_magnitude_shader = False
         
-        # Visualization mode: 0=render, 1=dx, 2=dy, 3=dxy, 4=upscaled, 5=magnitude
+        # Visualization mode: 0=render, 1=upscaled, 2=target, 3=ground_truth, 4=gradients
         self.vis_mode = 0
-        self.vis_mode_names = ["Render", "dX", "dY", "dXY", "Upscaled", "Magnitude"]
-        self.pixel_perfect = False  # Flag for pixel-perfect rendering
+        self.gradient_mode = 0  # 0=dx, 1=dy, 2=dxy, 3=magnitude (для vis_mode==4)
+        self.vis_mode_names = ["Render", "Upscaled", "Target", "Ground Truth", "Gradients"]
+        self.gradient_mode_names = ["dX", "dY", "dXY", "Magnitude"]
         
         # Флаги для апскейлинга
         self.use_upscale_shader = False
@@ -172,6 +189,22 @@ class LIGVisualizer:
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
         
+        # Инициализация текстуры для target image
+        self.texture_target = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_target)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        
+        # Инициализация текстуры для ground truth
+        self.texture_gt = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_gt)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        
         self._init_cuda_interop()
         
         glfw.swap_interval(2)
@@ -235,10 +268,6 @@ class LIGVisualizer:
         if imgui.get_io().want_capture_mouse:
             return
         
-        # В режиме pixel perfect zoom зафиксирован на 1.0
-        if self.pixel_perfect:
-            return
-        
         # При ручном изменении зума отключаем fit_to_window
         self.fit_to_window = False
         
@@ -266,16 +295,37 @@ class LIGVisualizer:
                     self.zoom = min(zoom_x, zoom_y)
                 else:
                     self.zoom = 1.0
-            elif key >= glfw.KEY_1 and key <= glfw.KEY_6:
-                # Switch visualization mode with keys 1-6
-                self.vis_mode = key - glfw.KEY_1
+            elif key == glfw.KEY_1:
+                self.vis_mode = 0  # Render
+            elif key == glfw.KEY_2:
+                self.vis_mode = 1  # Upscaled
+            elif key == glfw.KEY_3:
+                self.vis_mode = 2  # Target
+            elif key == glfw.KEY_4:
+                self.vis_mode = 3  # Ground Truth
+            elif key == glfw.KEY_5:
+                # Переключение градиентов по кругу
+                if self.vis_mode != 4:
+                    self.vis_mode = 4
+                    self.gradient_mode = 0  # Начинаем с dx
+                else:
+                    # Циклическое переключение между dx, dy, dxy, magnitude
+                    self.gradient_mode = (self.gradient_mode + 1) % 4
+            elif key == glfw.KEY_0:
+                # Установка zoom в 1.0
+                self.zoom = 1.0
+                self.fit_to_window = False
             elif key == glfw.KEY_ESCAPE:
                 glfw.set_window_should_close(self.window, True)
                 
-    def setModel(self, gaussian_model, gt_image):
+    def set_model(self, gaussian_model, gt_image):
         """Set the model and ground truth image for rendering"""
         self.gaussian_model = gaussian_model
         self.gt_image = gt_image
+        
+    def set_target_image(self, reference_image):
+        """Set target image (e.g., first low-res image in multi-scale)"""
+        self.target_image = reference_image
         
     def set_updated(self):
         """Signal that model was updated and needs re-rendering"""
@@ -503,10 +553,14 @@ class LIGVisualizer:
             try:
                 with torch.no_grad():
                     # Check if model is on CUDA before rendering
-                    first_param = next(self.gaussian_model.parameters(), None)
+                    if not self.gaussian_model and self.gaussian_model.level_models:
+                        return
+
+                    base_model = self.gaussian_model.level_models[0]
+                    first_param = next(base_model.parameters(), None)
                     if first_param is not None and first_param.is_cuda:
                         # Render the current state without changing model mode
-                        result = self.gaussian_model()
+                        result = base_model()
                         rendered = result["render"].float()
 
                         # Store derivatives if available
@@ -516,25 +570,11 @@ class LIGVisualizer:
 
                         # Choose what to display based on vis_mode
                         if self.vis_mode == 0:
+                            # Render mode
                             display_tensor = rendered
                             image_tensor = self._prepare_render_data(display_tensor)
                             self._update_texture(image_tensor)
-                        elif self.vis_mode == 1 and dx is not None:
-                            display_tensor = dx.float()
-                            image_tensor = self._prepare_gradient_data(display_tensor)
-                            self._update_texture(image_tensor)
-                            self.use_gradient_shader = True
-                        elif self.vis_mode == 2 and dy is not None:
-                            display_tensor = dy.float()
-                            image_tensor = self._prepare_gradient_data(display_tensor)
-                            self._update_texture(image_tensor)
-                            self.use_gradient_shader = True
-                        elif self.vis_mode == 3 and dxy is not None:
-                            display_tensor = dxy.float()
-                            image_tensor = self._prepare_gradient_data(display_tensor)
-                            self._update_texture(image_tensor)
-                            self.use_gradient_shader = True
-                        elif self.vis_mode == 4:
+                        elif self.vis_mode == 1:
                             # Upscaled mode - use GL shader upscaling
                             if dx is not None and dy is not None and dxy is not None:
                                 self._update_gradient_textures(dx, dy, dxy)
@@ -548,22 +588,93 @@ class LIGVisualizer:
                                 image_tensor = self._prepare_render_data(display_tensor)
                                 self._update_texture(image_tensor)
                                 self.use_upscale_shader = False
-                        elif self.vis_mode == 5:
-                            # Magnitude mode - compute gradient magnitude
-                            if dx is not None and dy is not None:
-                                # Update gradient textures for magnitude shader
-                                self._update_gradient_textures(dx, dy, dxy if dxy is not None else dx)
-                                # Use rendered image for texture (not used in magnitude shader but needed for consistency)
-                                display_tensor = rendered
-                                image_tensor = self._prepare_render_data(display_tensor)
+                        elif self.vis_mode == 2:
+                            # Target mode - показываем мелкую картинку
+                            if self.target_image is not None:
+                                # Загружаем текстуру при первом обращении
+                                if self.target_width == 1:  # Признак что текстура ещё не загружена
+                                    target_tensor = self._prepare_render_data(self.target_image)
+                                    h, w = target_tensor.shape[:2]
+                                    self.target_width = w
+                                    self.target_height = h
+                                    
+                                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_target)
+                                    if target_tensor.is_cuda:
+                                        target_np = target_tensor.detach().cpu().numpy()
+                                    else:
+                                        target_np = target_tensor.numpy()
+                                    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
+                                                   gl.GL_RGBA, gl.GL_FLOAT, target_np)
+                                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                                
+                                # Обновляем размеры для правильного отображения
+                                self.image_width = self.target_width
+                                self.image_height = self.target_height
+                                self.image_aspect = self.target_width / self.target_height if self.target_height > 0 else 1.0
+                        elif self.vis_mode == 3:
+                            # Ground Truth mode
+                            if self.gt_image is not None:
+                                # Загружаем текстуру при первом обращении
+                                if self.gt_width == 1:  # Признак что текстура ещё не загружена
+                                    gt_tensor = self._prepare_render_data(self.gt_image)
+                                    h, w = gt_tensor.shape[:2]
+                                    self.gt_width = w
+                                    self.gt_height = h
+                                    
+                                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_gt)
+                                    if gt_tensor.is_cuda:
+                                        gt_np = gt_tensor.detach().cpu().numpy()
+                                    else:
+                                        gt_np = gt_tensor.numpy()
+                                    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
+                                                   gl.GL_RGBA, gl.GL_FLOAT, gt_np)
+                                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                                
+                                # Обновляем размеры для правильного отображения
+                                self.image_width = self.gt_width
+                                self.image_height = self.gt_height
+                                self.image_aspect = self.gt_width / self.gt_height if self.gt_height > 0 else 1.0
+                        elif self.vis_mode == 4:
+                            # Gradient mode - показываем градиенты в зависимости от gradient_mode
+                            if self.gradient_mode == 0 and dx is not None:
+                                # dX mode
+                                display_tensor = dx.float()
+                                image_tensor = self._prepare_gradient_data(display_tensor)
                                 self._update_texture(image_tensor)
-                                self.use_magnitude_shader = True
+                                self.use_gradient_shader = True
+                            elif self.gradient_mode == 1 and dy is not None:
+                                # dY mode
+                                display_tensor = dy.float()
+                                image_tensor = self._prepare_gradient_data(display_tensor)
+                                self._update_texture(image_tensor)
+                                self.use_gradient_shader = True
+                            elif self.gradient_mode == 2 and dxy is not None:
+                                # dXY mode
+                                display_tensor = dxy.float()
+                                image_tensor = self._prepare_gradient_data(display_tensor)
+                                self._update_texture(image_tensor)
+                                self.use_gradient_shader = True
+                            elif self.gradient_mode == 3:
+                                # Magnitude mode
+                                if dx is not None and dy is not None:
+                                    # Update gradient textures for magnitude shader
+                                    self._update_gradient_textures(dx, dy, dxy if dxy is not None else dx)
+                                    # Use rendered image for texture (not used in magnitude shader but needed for consistency)
+                                    display_tensor = rendered
+                                    image_tensor = self._prepare_render_data(display_tensor)
+                                    self._update_texture(image_tensor)
+                                    self.use_magnitude_shader = True
+                                else:
+                                    # Fallback to regular rendering if derivatives not available
+                                    display_tensor = rendered
+                                    image_tensor = self._prepare_render_data(display_tensor)
+                                    self._update_texture(image_tensor)
+                                    self.use_magnitude_shader = False
                             else:
-                                # Fallback to regular rendering if derivatives not available
+                                # Fallback to regular rendering
                                 display_tensor = rendered
                                 image_tensor = self._prepare_render_data(display_tensor)
                                 self._update_texture(image_tensor)
-                                self.use_magnitude_shader = False
                         else:
                             display_tensor = rendered
                             # Fallback to regular rendering
@@ -584,7 +695,12 @@ class LIGVisualizer:
         
     def _setup_shader(self):
         """Setup and bind appropriate shader for rendering"""
-        if self.current_image is None:
+        # Проверяем наличие данных в зависимости от режима
+        if self.vis_mode == 2 and self.target_image is None:
+            return
+        elif self.vis_mode == 3 and self.gt_image is None:
+            return
+        elif self.vis_mode in [0, 1, 4] and self.current_image is None:
             return
             
         if self.use_upscale_shader:
@@ -622,8 +738,7 @@ class LIGVisualizer:
         elif self.use_magnitude_shader:
             gl.glUseProgram(self.magnitude_program)
             gl.glUniform2f(gl.glGetUniformLocation(self.magnitude_program, "pan"), float(self.pan_x), float(self.pan_y))
-            # Передаём zoom=1.0 для pixel_perfect, иначе self.zoom
-            gl.glUniform1f(gl.glGetUniformLocation(self.magnitude_program, "zoom"), 1.0 if self.pixel_perfect else self.zoom)
+            gl.glUniform1f(gl.glGetUniformLocation(self.magnitude_program, "zoom"), self.zoom)
             gl.glUniform2f(gl.glGetUniformLocation(self.magnitude_program, "window_size"), float(self.width), float(self.height))
             gl.glUniform2f(gl.glGetUniformLocation(self.magnitude_program, "texture_size"), float(self.image_width), float(self.image_height))
             
@@ -641,8 +756,7 @@ class LIGVisualizer:
         elif self.use_gradient_shader:
             gl.glUseProgram(self.gradient_program)
             gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "pan"), float(self.pan_x), float(self.pan_y))
-            # Передаём zoom=1.0 для pixel_perfect, иначе self.zoom
-            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "zoom"), 1.0 if self.pixel_perfect else self.zoom)
+            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "zoom"), self.zoom)
             gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "window_size"), float(self.width), float(self.height))
             gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "texture_size"), float(self.image_width), float(self.image_height))
             
@@ -654,13 +768,24 @@ class LIGVisualizer:
         else:
             gl.glUseProgram(self.program)
             gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), float(self.pan_x), float(self.pan_y))
-            # Передаём zoom=1.0 для pixel_perfect, иначе self.zoom
-            gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), 1.0 if self.pixel_perfect else self.zoom)
+            # Для GT режима корректируем зум на соотношение размеров
+            if self.vis_mode == 3 and self.target_width > 0 and self.gt_width > 0:
+                zoom_correction = self.target_width / self.gt_width
+                effective_zoom = self.zoom * zoom_correction
+            else:
+                effective_zoom = self.zoom
+            gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), effective_zoom)
             gl.glUniform2f(gl.glGetUniformLocation(self.program, "window_size"), float(self.width), float(self.height))
             gl.glUniform2f(gl.glGetUniformLocation(self.program, "texture_size"), float(self.image_width), float(self.image_height))
             
             gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
+            # Выбираем текстуру в зависимости от режима
+            if self.vis_mode == 2:
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_target)
+            elif self.vis_mode == 3:
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_gt)
+            else:
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
         
     def _draw_gui(self):
         """Draw ImGui interface"""
@@ -690,48 +815,31 @@ class LIGVisualizer:
         
         imgui.separator()
         
-        # Pixel perfect checkbox
-        # В режиме upscale pixel-perfect не показывается (он всегда включен внутри)
-        if self.vis_mode != 4:
-            changed, self.pixel_perfect = imgui.checkbox("Pixel Perfect", self.pixel_perfect)
-            # При включении pixel_perfect фиксируем zoom на 1.0
-            if changed and self.pixel_perfect:
-                self.zoom = 1.0
-            
-            if imgui.is_item_hovered():
-                imgui.set_tooltip("Toggle between stretch to window and 1:1 pixel rendering")
-        
-        imgui.separator()
-        
         # Display mode radio buttons
         imgui.text("Display:")
         
-        if imgui.radio_button("Image [1]", self.vis_mode == 0):
+        if imgui.radio_button("Render [1]", self.vis_mode == 0):
             self.vis_mode = 0
-            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         imgui.same_line()
-        if imgui.radio_button("dX [2]", self.vis_mode == 1):
+        if imgui.radio_button("Upscaled [2]", self.vis_mode == 1):
             self.vis_mode = 1
-            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         
-        if imgui.radio_button("dY [3]", self.vis_mode == 2):
+        if imgui.radio_button("Target [3]", self.vis_mode == 2):
             self.vis_mode = 2
-            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         imgui.same_line()
-        if imgui.radio_button("dXY [4]", self.vis_mode == 3):
+        if imgui.radio_button("GT [4]", self.vis_mode == 3):
             self.vis_mode = 3
-            self.pixel_perfect = False  # Отключаем pixel_perfect при выходе из upscale
         
-        if imgui.radio_button("Upscaled [5]", self.vis_mode == 4):
+        # Градиенты - показываем текущий режим
+        gradient_label = f"Gradients [{self.gradient_mode_names[self.gradient_mode]}] [5]"
+        if imgui.radio_button(gradient_label, self.vis_mode == 4):
             self.vis_mode = 4
-        imgui.same_line()
-        if imgui.radio_button("Magnitude [6]", self.vis_mode == 5):
-            self.vis_mode = 5
+        
         imgui.separator()
         
         # Zoom slider - общий для всех режимов
         # В режиме upscale показываем как "Upscaler zoom"
-        if self.vis_mode == 4:
+        if self.vis_mode == 1:
             display_zoom = self.zoom
             changed, self.zoom = imgui.slider_float(
                 "Upscaler zoom", 
@@ -743,11 +851,6 @@ class LIGVisualizer:
             # При ручном изменении зума отключаем fit_to_window
             if changed:
                 self.fit_to_window = False
-        # В режиме pixel perfect zoom зафиксирован на 1.0
-        elif self.pixel_perfect:
-            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
-            imgui.text(f"Zoom: 1.00x (locked in pixel perfect)")
-            imgui.pop_style_var()
         else:
             display_zoom = self.zoom
             
@@ -772,24 +875,24 @@ class LIGVisualizer:
         imgui.set_next_window_size(300, 350)
         imgui.begin("Info")
         imgui.text(f"Mode: {'CUDA' if self.use_cuda else 'CPU'}")
-        imgui.text(f"View: {self.vis_mode_names[self.vis_mode]}")
+        # Для градиентов показываем подрежим
+        if self.vis_mode == 4:
+            imgui.text(f"View: {self.vis_mode_names[self.vis_mode]} ({self.gradient_mode_names[self.gradient_mode]})")
+        else:
+            imgui.text(f"View: {self.vis_mode_names[self.vis_mode]}")
         imgui.separator()
         imgui.text(f"Iteration: {self.current_iter}")
         imgui.text(f"PSNR: {self.current_psnr:.2f} dB")
         imgui.text(f"Loss: {self.current_loss:.6f}")
         imgui.separator()
-        # Показываем реальный zoom относительно исходного изображения
-        if self.pixel_perfect:
-            # В режиме pixel perfect zoom всегда 1.0
-            display_zoom = 1.0
+        # Показываем реальный zoom
+        if self.image_width > 0 and self.image_height > 0:
+            window_scale_x = self.width / float(self.image_width)
+            window_scale_y = self.height / float(self.image_height)
+            window_scale = min(window_scale_x, window_scale_y)
+            display_zoom = self.zoom * window_scale
         else:
-            if self.image_width > 0 and self.image_height > 0:
-                window_scale_x = self.width / float(self.image_width)
-                window_scale_y = self.height / float(self.image_height)
-                window_scale = min(window_scale_x, window_scale_y)
-                display_zoom = self.zoom * window_scale
-            else:
-                display_zoom = self.zoom
+            display_zoom = self.zoom
         imgui.text(f"Zoom: {display_zoom:.2f}x")
         imgui.text(f"Pan: ({self.pan_x:.0f}, {self.pan_y:.0f}) px")
         imgui.separator()
@@ -797,7 +900,9 @@ class LIGVisualizer:
         imgui.text("LMB - Pan")
         imgui.text("Scroll - Zoom")
         imgui.text("R - Reset view")
-        imgui.text("1-6 - Switch view mode")
+        imgui.text("0 - Set zoom to 1.0")
+        imgui.text("1-4 - Switch view mode")
+        imgui.text("5 - Cycle gradients")
         imgui.text("ESC - Exit")
         imgui.end()
         
@@ -814,7 +919,10 @@ class LIGVisualizer:
             self._render_model()
             
             # Render image
-            if self.current_image is not None:
+            # Рендерим в зависимости от режима
+            if ((self.vis_mode in [0, 1, 4] and self.current_image is not None) or
+                (self.vis_mode == 2 and self.target_image is not None) or
+                (self.vis_mode == 3 and self.gt_image is not None)):
                 self._setup_shader()
                 gl.glBindVertexArray(self.vao)
                 gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
