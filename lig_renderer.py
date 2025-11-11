@@ -102,6 +102,7 @@ def _render_lig_model(
         "dx": result.get("dx"),
         "dy": result.get("dy"),
         "dxy": result.get("dxy"),
+        "wsum": result.get("wsum")
     }
 
 

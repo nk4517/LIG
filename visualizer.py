@@ -37,6 +37,7 @@ class VisMode(IntEnum):
     TARGET = 2
     GROUND_TRUTH = 3
     GRADIENTS = 4
+    WSUM = 5
 
 
 class GradientMode(IntEnum):
@@ -309,6 +310,7 @@ class LIGVisualizer:
         # Создаём все текстуры через unified storage
         for name in (
                 'render', 'dx', 'dy', 'dxy', 'target', 'gt',
+                'wsum',
         ):
             self.textures[name] = TextureSlot(gl_id=_create_texture())
 
@@ -404,6 +406,9 @@ class LIGVisualizer:
                     # Циклическое переключение между dx, dy, dxy, magnitude
                     self.gradient_mode = GradientMode((self.gradient_mode + 1) % 4)
                 self.was_updated = True
+            elif key == glfw.KEY_6:
+                self.vis_mode = VisMode.WSUM
+                self.was_updated = True
             elif key == glfw.KEY_0:
                 # Установка display_width = image_width (zoom 1:1)
                 self.display_width = float(self.displayed_image_width) if self.displayed_image_width > 0 else 800.0
@@ -470,6 +475,26 @@ class LIGVisualizer:
             slot = self.textures[slot_name]
             upload_to_slot(tensor.float(), slot, self.use_cuda)
 
+    def _update_wsum_texture(self, wsum: torch.Tensor):
+        """Обновление текстуры wsum с нормализацией по 1 и 99 перцентилю"""
+        if wsum.dim() == 4:
+            wsum = wsum.squeeze(0)
+        if wsum.dim() == 3:
+            wsum = wsum.mean(dim=0)
+
+        # Нормализация по перцентилям
+        p1 = torch.quantile(wsum.flatten(), 0.01)
+        p99 = torch.quantile(wsum.flatten(), 0.99)
+        wsum_norm = (wsum - p1) / (p99 - p1 + 1e-8)
+        wsum_norm = torch.clamp(wsum_norm, 0, 1)
+
+        # Преобразование в RGBA
+        wsum_rgba = wsum_norm.unsqueeze(-1).repeat(1, 1, 4)
+        wsum_rgba[..., 3] = 1.0
+
+        slot = self.textures['wsum']
+        upload_to_slot(wsum_rgba.float(), slot, self.use_cuda)
+
     def _prepare_gradient_tensor(self, gradient: torch.Tensor):
         """Подготовка тензора градиента для текстуры"""
         if gradient.dim() == 4:
@@ -530,12 +555,16 @@ class LIGVisualizer:
         dx = render_data.get("dx")
         dy = render_data.get("dy")
         dxy = render_data.get("dxy")
+        wsum = render_data.get("wsum")
 
         if self.vis_mode == VisMode.TARGET and self.target_image is not None:
             self._update_image_texture(_gsplat_tensor_to_gl_tensor(self.target_image), 'target')
             return
         if self.vis_mode == VisMode.GROUND_TRUTH and self.gt_image is not None:
             self._update_image_texture(_gsplat_tensor_to_gl_tensor(self.gt_image), 'gt')
+            return
+        if self.vis_mode == VisMode.WSUM and wsum is not None:
+            self._update_wsum_texture(wsum)
             return
 
         rendered_gl = _gsplat_tensor_to_gl_tensor(render_data["rendered"])
@@ -586,6 +615,14 @@ class LIGVisualizer:
                            float(self.displayed_image_width), float(self.displayed_image_height))
             gl.glUniform2f(gl.glGetUniformLocation(prog, "target_size"),
                            float(self.displayed_image_width * self.zoom), float(self.displayed_image_height * self.zoom))
+        elif self.vis_mode == VisMode.WSUM:
+            prog = self.colormap_lut_program
+            gl.glUseProgram(prog)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.textures['wsum'].gl_id)
+            gl.glUniform1i(gl.glGetUniformLocation(prog, "texData"), 0)
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.lut_textures['viridis'])
+            gl.glUniform1i(gl.glGetUniformLocation(prog, "texLUT"), 1)
         elif self.vis_mode == VisMode.GRADIENTS and self.gradient_mode == GradientMode.MAGNITUDE:
             prog = self.magnitude_lut_program
             gl.glUseProgram(prog)
@@ -669,6 +706,10 @@ class LIGVisualizer:
             self.vis_mode = VisMode.GRADIENTS
             self.was_updated = True
 
+        if imgui.radio_button("Wsum [6]", self.vis_mode == VisMode.WSUM):
+            self.vis_mode = VisMode.WSUM
+            self.was_updated = True
+
         imgui.separator()
 
         # LIG-specific controls
@@ -715,6 +756,8 @@ class LIGVisualizer:
         imgui.text(f"  Render: {r.width}x{r.height}")
         dx = self.textures.get('dx', TextureSlot())
         imgui.text(f"  Grads: {dx.width}x{dx.height}")
+        w = self.textures.get('wsum', TextureSlot())
+        imgui.text(f"  Wsum: {w.width}x{w.height}")
         t = self.textures.get('target', TextureSlot())
         imgui.text(f"  Target: {t.width}x{t.height}")
         g = self.textures.get('gt', TextureSlot())
@@ -730,6 +773,7 @@ class LIGVisualizer:
         imgui.text("0 - Set zoom to 1.0")
         imgui.text("1-6 - Switch view mode")
         imgui.text("5 - Cycle gradients")
+        imgui.text("6 - Wsum view")
         imgui.text("B - Base level (L0)")
         imgui.text("C - Current level")
         imgui.text("D - Toggle residual")
