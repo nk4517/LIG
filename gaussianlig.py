@@ -56,6 +56,7 @@ class Gaussian2D(nn.Module):
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3, device=self.device))
         d = 3
         self._rgb_logits = nn.Parameter(torch.zeros(self.init_num_points, d, device=self.device))
+        self._opacity_logits = nn.Parameter(torch.zeros(self.init_num_points, device=self.device))
 
         self.means.requires_grad = True
         self._cholesky.requires_grad = True
@@ -66,6 +67,7 @@ class Gaussian2D(nn.Module):
                 {'params': self._rgb_logits, 'lr': kwargs["lr"]},
                 {'params': self.means, 'lr': kwargs["lr"] * 2},
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5},
+                {'params': self._opacity_logits, 'lr': kwargs["lr"]}
             ])
         else:
             s = 1
@@ -73,6 +75,7 @@ class Gaussian2D(nn.Module):
                 {'params': self._rgb_logits, 'lr': kwargs["lr"] * 5 * s},
                 {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5 * s},
+                {'params': self._opacity_logits, 'lr': kwargs["lr"] * s}
             ],
                 betas=(0.98, 0.92, 0.99),
                 fused=True)
@@ -89,6 +92,10 @@ class Gaussian2D(nn.Module):
     def rgbs(self):
         return torch.sigmoid(self._rgb_logits)
 
+    @property
+    def opacities(self):
+        return torch.sigmoid(self._opacity_logits)
+
     def forward(self):
         (
             xys,
@@ -101,6 +108,7 @@ class Gaussian2D(nn.Module):
             self.H,
             self.W,
             self.B_SIZE,
+            self.opacities
         )
         out_img = rasterize_gaussians(
                 xys,
@@ -108,7 +116,7 @@ class Gaussian2D(nn.Module):
                 conics,
                 num_tiles_hit,
                 self.rgbs,
-                None,
+                self.opacities,
                 self.H,
                 self.W,
                 self.B_SIZE,
