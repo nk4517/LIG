@@ -4,6 +4,7 @@ import OpenGL.GL as gl
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 import torch
+from pathlib import Path
 
 from LIG.upscaler_torch import bicubic_spline_upscale_single_channel
 
@@ -13,87 +14,10 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-VERTEX_SHADER_SOURCE = """
-#version 450
-
-smooth out vec2 texcoords;
-
-vec4 positions[3] = vec4[3](
-    vec4(-1.0, 1.0, 0.0, 1.0),
-    vec4(3.0, 1.0, 0.0, 1.0),
-    vec4(-1.0, -3.0, 0.0, 1.0)
-);
-
-vec2 texpos[3] = vec2[3](
-    vec2(0, 0),
-    vec2(2, 0),
-    vec2(0, 2)
-);
-
-void main() {
-    gl_Position = positions[gl_VertexID];
-    texcoords = texpos[gl_VertexID];
-}
-"""
-
-FRAGMENT_SHADER_SOURCE = """
-#version 330
-
-smooth in vec2 texcoords;
-out vec4 outputColour;
-
-uniform sampler2D texSampler;
-uniform vec2 pan;
-uniform float zoom;
-uniform float window_aspect;
-uniform float image_aspect;
-uniform int pixel_perfect;  // 0=normal, 1=pixel perfect
-uniform vec2 window_size;
-uniform vec2 texture_size;
-
-void main()
-{
-    vec2 uv;
-    
-    if (pixel_perfect == 1) {
-        // Pixel-perfect mode - map screen pixels directly to texture pixels
-        vec2 screen_pos = texcoords * window_size;
-        vec2 center_offset = (window_size - texture_size) * 0.5;
-        vec2 tex_pos = screen_pos - center_offset;
-        
-        // Apply pan in pixel space
-        tex_pos -= pan * texture_size;
-        
-        uv = tex_pos / texture_size;
-    } else {
-        // Normal mode with aspect correction
-        vec2 centered = (texcoords - vec2(0.5));
-    
-    // Correct for window aspect ratio to maintain image aspect ratio
-    float scale_x = 1.0;
-    float scale_y = 1.0;
-    
-    if (window_aspect > image_aspect) {
-        // Window is wider than image - scale x
-        scale_x = window_aspect / image_aspect;
-    } else {
-        // Window is taller than image - scale y
-        scale_y = image_aspect / window_aspect;
-    }
-    
-    centered.x *= scale_x;
-    centered.y *= scale_y;
-    
-        uv = centered / zoom + vec2(0.5) + pan;
-    }
-    
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        outputColour = vec4(0.2, 0.2, 0.2, 1.0);
-    } else {
-        outputColour = texture(texSampler, uv);
-    }
-}
-"""
+def load_shader(shader_path):
+    """Load shader source from file"""
+    with open(shader_path, 'r') as f:
+        return f.read()
 
 def compile_shaders(vertex_source, fragment_source):
     vertex_shader = gl.glCreateShader(gl.GL_VERTEX_SHADER)
@@ -152,6 +76,8 @@ class LIGVisualizer:
         self.program = None
         self.vao = None
         
+        self.upscale_program = None
+        
         # Flag for visualization updates
         self.was_updated = False
         
@@ -164,6 +90,10 @@ class LIGVisualizer:
         self.vis_mode = 0
         self.vis_mode_names = ["Render", "dX", "dY", "dXY", "Upscaled", "Upscaled 1:1", "Original 1:1"]
         self.pixel_perfect = False  # Flag for pixel-perfect rendering
+        
+        # Флаги для апскейлинга
+        self.use_upscale_shader = False
+        self.upscale_factor = 2
         
     def init(self):
         if not glfw.init():
@@ -193,11 +123,40 @@ class LIGVisualizer:
         
         self.impl = GlfwRenderer(self.window, attach_callbacks=False)
         
-        self.program = compile_shaders(VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE)
+        # Load shaders from files
+        shader_dir = Path(__file__).parent / "shaders"
+        vertex_source = load_shader(shader_dir / "fullscreen.vert")
+        texture_fragment = load_shader(shader_dir / "texture.frag")
+        upscale_fragment = load_shader(shader_dir / "upscale.frag")
+        
+        self.program = compile_shaders(vertex_source, texture_fragment)
+        self.upscale_program = compile_shaders(vertex_source, upscale_fragment)
         self.vao = gl.glGenVertexArrays(1)
         
         self.texture = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        
+        # Инициализация текстур для градиентов
+        self.texture_dx = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        
+        self.texture_dy = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        
+        self.texture_dxy = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dxy)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
@@ -455,6 +414,44 @@ class LIGVisualizer:
         (err,) = cu.cudaGraphicsUnmapResources(1, self.cuda_image, cu.cudaStreamLegacy)
         if err != cu.cudaError_t.cudaSuccess:
             raise RuntimeError("Unable to unmap graphics resource")
+    
+    def _update_gradient_textures(self, dx, dy, dxy):
+        """Обновление текстур градиентов для апскейлинга"""
+        # Подготовка тензоров градиентов
+        dx_tensor = self._prepare_gradient_tensor(dx)
+        dy_tensor = self._prepare_gradient_tensor(dy)
+        dxy_tensor = self._prepare_gradient_tensor(dxy)
+        
+        h, w = dx_tensor.shape[:2]
+        
+        # Обновление текстуры dx
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
+        if dx_tensor.is_cuda:
+            dx_np = dx_tensor.detach().cpu().numpy()
+        else:
+            dx_np = dx_tensor.numpy()
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
+                       gl.GL_RGBA, gl.GL_FLOAT, dx_np)
+        
+        # Обновление текстуры dy
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
+        if dy_tensor.is_cuda:
+            dy_np = dy_tensor.detach().cpu().numpy()
+        else:
+            dy_np = dy_tensor.numpy()
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
+                       gl.GL_RGBA, gl.GL_FLOAT, dy_np)
+        
+        # Обновление текстуры dxy
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dxy)
+        if dxy_tensor.is_cuda:
+            dxy_np = dxy_tensor.detach().cpu().numpy()
+        else:
+            dxy_np = dxy_tensor.numpy()
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
+                       gl.GL_RGBA, gl.GL_FLOAT, dxy_np)
+        
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
         
     def main_loop(self):
         while not glfw.window_should_close(self.window):
@@ -586,19 +583,25 @@ class LIGVisualizer:
                                             # Fallback to regular rendering if derivatives not available
                                             display_tensor = rendered
                                             image_tensor = self._prepare_render_data(display_tensor)
+                                            self._update_texture(image_tensor)
+                                            self.use_upscale_shader = False
                                             self.pixel_perfect = False
                                     elif self.vis_mode == 6:
                                         # Original 1:1 pixel perfect mode
                                         display_tensor = rendered
                                         image_tensor = self._prepare_render_data(display_tensor)
+                                        self._update_texture(image_tensor)
                                         self.pixel_perfect = True
                                     else:
                                         display_tensor = rendered
                                         # Fallback to regular rendering
                                         image_tensor = self._prepare_render_data(display_tensor)
+                                        self._update_texture(image_tensor)
                                         self.pixel_perfect = False
                                     
-                                    self._update_texture(image_tensor)
+                                    # Обновляем текстуру только если это не было сделано в режимах 1-6
+                                    if self.vis_mode == 0:
+                                        self._update_texture(image_tensor)
                                     
                                     # Clear the flag after rendering
                                     self.was_updated = False
@@ -614,16 +617,55 @@ class LIGVisualizer:
             
             # Render image
             if self.current_image is not None:
-                gl.glUseProgram(self.program)
-                gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), self.pan_x, self.pan_y)
-                gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), self.zoom)
-                gl.glUniform1f(gl.glGetUniformLocation(self.program, "window_aspect"), self.aspect)
-                gl.glUniform1f(gl.glGetUniformLocation(self.program, "image_aspect"), self.image_aspect)
-                gl.glUniform1i(gl.glGetUniformLocation(self.program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
-                gl.glUniform2f(gl.glGetUniformLocation(self.program, "window_size"), float(self.width), float(self.height))
-                gl.glUniform2f(gl.glGetUniformLocation(self.program, "texture_size"), float(self.image_width), float(self.image_height))
+                # Выбираем правильный шейдер
+                if self.use_upscale_shader:
+                    gl.glUseProgram(self.upscale_program)
+                    
+                    # Устанавливаем униформы для апскейлинга
+                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "source_size"), 
+                                  float(self.image_width), float(self.image_height))
+                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "target_size"), 
+                                  float(self.image_width * self.upscale_factor), 
+                                  float(self.image_height * self.upscale_factor))
+                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "pan"), self.pan_x, self.pan_y)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "zoom"), self.zoom)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "window_aspect"), self.aspect)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "image_aspect"), self.image_aspect)
+                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "window_size"), float(self.width), float(self.height))
+                    
+                    # Привязываем текстуры
+                    gl.glActiveTexture(gl.GL_TEXTURE0)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
+                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texRender"), 0)
+                    
+                    gl.glActiveTexture(gl.GL_TEXTURE1)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
+                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDx"), 1)
+                    
+                    gl.glActiveTexture(gl.GL_TEXTURE2)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
+                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDy"), 2)
+                    
+                    gl.glActiveTexture(gl.GL_TEXTURE3)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dxy)
+                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDxy"), 3)
+                    
+                    # Сбрасываем флаг после использования
+                    self.use_upscale_shader = False
+                else:
+                    gl.glUseProgram(self.program)
+                    gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), self.pan_x, self.pan_y)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), self.zoom)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.program, "window_aspect"), self.aspect)
+                    gl.glUniform1f(gl.glGetUniformLocation(self.program, "image_aspect"), self.image_aspect)
+                    gl.glUniform1i(gl.glGetUniformLocation(self.program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+                    gl.glUniform2f(gl.glGetUniformLocation(self.program, "window_size"), float(self.width), float(self.height))
+                    gl.glUniform2f(gl.glGetUniformLocation(self.program, "texture_size"), float(self.image_width), float(self.image_height))
+                    
+                    gl.glActiveTexture(gl.GL_TEXTURE0)
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
                 
-                gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
                 gl.glBindVertexArray(self.vao)
                 gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
             
