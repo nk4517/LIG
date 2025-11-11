@@ -205,7 +205,7 @@ torch::Tensor get_tile_bin_edges_tensor(
     return tile_bins;
 }
 
-std::tuple<torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
@@ -245,6 +245,15 @@ rasterize_forward_tensor(
     torch::Tensor out_img = torch::zeros(
         {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
     );
+    torch::Tensor out_dx = torch::zeros(
+        {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor out_dy = torch::zeros(
+        {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor out_dxy = torch::zeros(
+        {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
+    );
     torch::Tensor final_idx = torch::zeros(
         {img_height, img_width}, xys.options().dtype(torch::kInt32)
     );
@@ -258,10 +267,13 @@ rasterize_forward_tensor(
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
         final_idx.contiguous().data_ptr<int>(),
-        (float3 *)out_img.contiguous().data_ptr<float>() //,
+        (float3 *)out_img.contiguous().data_ptr<float>(),
+        (float3 *)out_dx.contiguous().data_ptr<float>(),
+        (float3 *)out_dy.contiguous().data_ptr<float>(),
+        (float3 *)out_dxy.contiguous().data_ptr<float>() //,
     );
 
-    return std::make_tuple(out_img, final_idx);
+    return std::make_tuple(out_img, final_idx, out_dx, out_dy, out_dxy);
 }
 
 std::

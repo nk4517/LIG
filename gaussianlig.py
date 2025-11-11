@@ -80,7 +80,7 @@ class Gaussian2D(nn.Module):
             self.W,
             self.B_SIZE,
         )
-        out_img = rasterize_gaussians(
+        out_img, dx, dy, dxy = rasterize_gaussians(
                 xys,
                 radii,
                 conics,
@@ -89,11 +89,22 @@ class Gaussian2D(nn.Module):
                 self.H,
                 self.W,
                 self.B_SIZE,
-            )[..., :3]
+            )
 
-        out_img = torch.clamp(out_img, 0, 1)
+        out_img = torch.clamp(out_img[..., :3], 0, 1)
         out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
-        return {"render": out_img}
+
+        # Gradients can be negative, don't clamp them
+        dx = dx[..., :3]
+        dx = dx.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
+
+        dy = dy[..., :3]
+        dy = dy.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
+
+        dxy = dxy[..., :3]
+        dxy = dxy.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
+
+        return {"render": out_img, "dx": dx, "dy": dy, "dxy": dxy}
 
     def train_iter(self, gt_image):
         render_pkg = self.forward()
