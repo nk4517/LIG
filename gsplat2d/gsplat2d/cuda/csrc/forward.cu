@@ -125,7 +125,10 @@ __global__ void rasterize_forward(
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
     int* __restrict__ final_index,
-    float3* __restrict__ out_img
+    float3* __restrict__ out_img,
+    float3* __restrict__ out_dx,
+    float3* __restrict__ out_dy,
+    float3* __restrict__ out_dxy
 ) {
 
     auto block = cg::this_thread_block();
@@ -164,6 +167,9 @@ __global__ void rasterize_forward(
     // designated pixel
     int tr = block.thread_rank();
     float3 pix_out = {0.f, 0.f, 0.f};
+    float3 pix_dx = {0.f, 0.f, 0.f};
+    float3 pix_dy = {0.f, 0.f, 0.f};
+    float3 pix_dxy = {0.f, 0.f, 0.f};
     for (int b = 0; b < num_batches; ++b) {
         // resync all threads before beginning next batch
         // end early if entire tile is done
@@ -199,6 +205,26 @@ __global__ void rasterize_forward(
                 continue;
             }
 
+            // First-order partial derivatives of sigma (which represents -g_i from Eq. 37)
+            // sigma = 0.5 * d^T * conic * d, where d = [delta.x, delta.y]
+            // ∂sigma/∂x = conic.x * delta.x + conic.y * delta.y
+            // ∂sigma/∂y = conic.y * delta.x + conic.z * delta.y
+            const float d_sigma_dx = conic.x * delta.x + conic.y * delta.y;
+            const float d_sigma_dy = conic.y * delta.x + conic.z * delta.y;
+
+            // Second-order mixed partial derivative of sigma
+            // ∂²sigma/∂x∂y = conic.y (the off-diagonal element of the conic matrix)
+            const float d2_sigma_dxdy = conic.y;
+
+            // First-order partial derivatives of alpha = exp(-sigma) (adapted from Eq. 36)
+            // Using chain rule: ∂α/∂x = -α * ∂sigma/∂x
+            const float d_alpha_dx = -alpha * d_sigma_dx;
+            const float d_alpha_dy = -alpha * d_sigma_dy;
+
+            // Second-order mixed partial derivative of alpha
+            // ∂²α/∂x∂y = -α * (∂²sigma/∂x∂y - ∂sigma/∂x * ∂sigma/∂y)
+            // Derived using product rule on ∂α/∂x = -α * ∂sigma/∂x
+            const float d2_alpha_dxdy = -alpha * (d2_sigma_dxdy - d_sigma_dx * d_sigma_dy);
 
             int32_t g = id_batch[t];
             const float vis = alpha;
@@ -206,6 +232,24 @@ __global__ void rasterize_forward(
             pix_out.x += c.x * vis;
             pix_out.y += c.y * vis;
             pix_out.z += c.z * vis;
+            
+            // Accumulate gradients for weighted summation (simplified from Eqs. 46-49)
+            // For weighted sum: I(x,y) = Σ c_i * α_i(x,y)
+            // ∂I/∂x = Σ c_i * ∂α_i/∂x (no alpha-compositing terms)
+            pix_dx.x += c.x * d_alpha_dx;
+            pix_dx.y += c.y * d_alpha_dx;
+            pix_dx.z += c.z * d_alpha_dx;
+            
+            // ∂I/∂y = Σ c_i * ∂α_i/∂y
+            pix_dy.x += c.x * d_alpha_dy;
+            pix_dy.y += c.y * d_alpha_dy;
+            pix_dy.z += c.z * d_alpha_dy;
+            
+            // ∂²I/∂x∂y = Σ c_i * ∂²α_i/∂x∂y
+            pix_dxy.x += c.x * d2_alpha_dxdy;
+            pix_dxy.y += c.y * d2_alpha_dxdy;
+            pix_dxy.z += c.z * d2_alpha_dxdy;
+            
             cur_idx = batch_start + t;
         }
     }
@@ -214,5 +258,8 @@ __global__ void rasterize_forward(
         final_index[pix_id] =
             cur_idx; // index of in bin of last gaussian in this pixel
         out_img[pix_id] = pix_out;
+        out_dx[pix_id] = pix_dx;
+        out_dy[pix_id] = pix_dy;
+        out_dxy[pix_id] = pix_dxy;
     }
 }
