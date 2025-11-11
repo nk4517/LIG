@@ -77,11 +77,14 @@ void main() {
         return;
     }
 
+    // Apply compensation for the -0.5 offset after boundary check
+    // This ensures visual alignment with regular texture rendering
+    vec2 uv_compensated = (tex_pos + 0.5 * total_scale) / (source_size * total_scale);
+
     // Transform UV to source image coordinates
     // UV coordinates are relative to target_size, need to transform to source_size
     // First get position in target image pixels
-    vec2 target_pos = uv * target_size;
-    // Then scale to source dimensions
+    vec2 target_pos = uv_compensated * target_size;
     vec2 scale_factor = source_size / target_size;
     vec2 src_coord = target_pos * scale_factor - 0.5;
     vec2 left_upper = floor(src_coord);
