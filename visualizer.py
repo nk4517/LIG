@@ -5,6 +5,8 @@ import imgui
 from imgui.integrations.glfw import GlfwRenderer
 import torch
 
+from LIG.upscaler_torch import bicubic_spline_upscale_single_channel
+
 try:
     from cuda import cudart as cu
     CUDA_AVAILABLE = True
@@ -160,7 +162,7 @@ class LIGVisualizer:
         
         # Visualization mode: 0=render, 1=dx, 2=dy, 3=dxy
         self.vis_mode = 0
-        self.vis_mode_names = ["Render", "dX", "dY", "dXY"]
+        self.vis_mode_names = ["Render", "dX", "dY", "dXY", "Upscaled"]
         self.pixel_perfect = False  # Flag for pixel-perfect rendering
         
     def init(self):
@@ -281,8 +283,8 @@ class LIGVisualizer:
                 self.pan_x = 0.0
                 self.pan_y = 0.0
                 self.zoom = 1.0
-            elif key >= glfw.KEY_1 and key <= glfw.KEY_4:
-                # Switch visualization mode with keys 1-4
+            elif key >= glfw.KEY_1 and key <= glfw.KEY_5:
+                # Switch visualization mode with keys 1-5
                 self.vis_mode = key - glfw.KEY_1
             elif key == glfw.KEY_ESCAPE:
                 glfw.set_window_should_close(self.window, True)
@@ -501,6 +503,46 @@ class LIGVisualizer:
                                         display_tensor = dxy.float()
                                         # Use gradient visualization for derivatives
                                         image_tensor = self._prepare_gradient_data(display_tensor)
+                                    elif self.vis_mode == 4:
+                                        # Upscaled mode - use bicubic spline upscaling
+                                        h, w = rendered.permute(0, 2, 3, 1).shape[1:3]
+                                        scale_factor = 2
+                                        new_h = h * scale_factor
+                                        new_w = w * scale_factor
+                                        
+                                        # Ensure we have derivatives for upscaling
+                                        if dx is not None and dy is not None and dxy is not None:
+                                            # Process each channel separately to save memory
+                                            channels = []
+                                            rendered_hwc = rendered.squeeze(0).permute(1, 2, 0)  # [H, W, C]
+                                            dx_hwc = dx.squeeze(0).permute(1, 2, 0)
+                                            dy_hwc = dy.squeeze(0).permute(1, 2, 0)
+                                            dxy_hwc = dxy.squeeze(0).permute(1, 2, 0)
+                                            
+                                            for c in range(rendered_hwc.shape[2]):
+                                                upscaled_channel = bicubic_spline_upscale_single_channel(
+                                                    rendered_hwc[:, :, c], 
+                                                    dx_hwc[:, :, c], 
+                                                    dy_hwc[:, :, c], 
+                                                    dxy_hwc[:, :, c], 
+                                                    new_h, new_w
+                                                )
+                                                channels.append(upscaled_channel)
+                                            
+                                            # Stack channels back together
+                                            display_tensor = torch.stack(channels, dim=-1)  # [new_h, new_w, C]
+                                            image_tensor = torch.clamp(display_tensor, 0, 1)
+                                            
+                                            # Ensure RGBA
+                                            if image_tensor.shape[2] == 3:
+                                                alpha = torch.ones((*image_tensor.shape[:2], 1),
+                                                                 dtype=image_tensor.dtype,
+                                                                 device=image_tensor.device)
+                                                image_tensor = torch.cat([image_tensor, alpha], dim=2)
+                                        else:
+                                            # Fallback to regular rendering if derivatives not available
+                                            display_tensor = rendered
+                                            image_tensor = self._prepare_render_data(display_tensor)
                                     else:
                                         display_tensor = rendered
                                         # Fallback to regular rendering
@@ -553,7 +595,7 @@ class LIGVisualizer:
                 imgui.text("LMB - Pan")
                 imgui.text("Scroll - Zoom")
                 imgui.text("R - Reset view")
-                imgui.text("1-4 - Switch view mode")
+                imgui.text("1-5 - Switch view mode")
                 imgui.text("ESC - Exit")
                 imgui.end()
             
