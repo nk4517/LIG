@@ -158,6 +158,9 @@ class LIGVisualizer:
         self.current_psnr = 0.0
         self.current_loss = 0.0
         
+        # Visualization mode: 0=render, 1=dx, 2=dy, 3=dxy
+        self.vis_mode = 0
+        self.vis_mode_names = ["Render", "dX", "dY", "dXY"]
         self.pixel_perfect = False  # Flag for pixel-perfect rendering
         
     def init(self):
@@ -278,6 +281,9 @@ class LIGVisualizer:
                 self.pan_x = 0.0
                 self.pan_y = 0.0
                 self.zoom = 1.0
+            elif key >= glfw.KEY_1 and key <= glfw.KEY_4:
+                # Switch visualization mode with keys 1-4
+                self.vis_mode = key - glfw.KEY_1
             elif key == glfw.KEY_ESCAPE:
                 glfw.set_window_should_close(self.window, True)
                 
@@ -295,6 +301,40 @@ class LIGVisualizer:
         self.current_iter = iteration
         self.current_psnr = psnr
         self.current_loss = loss
+        
+    def _prepare_gradient_data(self, gradient):
+        """Prepare gradient tensor for visualization with red-blue colormap"""
+        # Handle different tensor dimensions
+        if gradient.dim() == 4:
+            gradient = gradient.squeeze(0)
+        
+        if gradient.dim() == 3:
+            # Average across channels (CHW -> HW)
+            gradient = gradient.mean(dim=0)
+        
+        # Use quantiles for robust normalization, symmetric around zero
+        q_low = torch.quantile(gradient.flatten(), 0.01)
+        q_high = torch.quantile(gradient.flatten(), 0.99)
+        
+        # Make symmetric around zero
+        max_abs = max(abs(q_low), abs(q_high))
+        
+        if max_abs > 1e-6:
+            gradient_norm = torch.clamp(gradient / max_abs, -1.0, 1.0)
+        else:
+            gradient_norm = torch.zeros_like(gradient)
+        
+        # Create red-blue colormap
+        # Negative values -> blue, positive values -> red
+        red = torch.clamp(gradient_norm, 0, 1)
+        blue = torch.clamp(-gradient_norm, 0, 1)
+        green = torch.zeros_like(gradient_norm)
+        alpha = torch.ones_like(gradient_norm)
+        
+        # Stack into RGBA tensor
+        image_tensor = torch.stack([red, green, blue, alpha], dim=-1)
+        
+        return image_tensor
         
     def _prepare_render_data(self, rendered):
         """Prepare rendered tensor for texture update"""
@@ -436,10 +476,36 @@ class LIGVisualizer:
                                 first_param = next(self.gaussian_model.parameters(), None)
                                 if first_param is not None and first_param.is_cuda:
                                     # Render the current state without changing model mode
-                                    rendered = self.gaussian_model()["render"].float()
+                                    result = self.gaussian_model()
+                                    rendered = result["render"].float()
                                     
-                                    # Prepare tensor for OpenGL
-                                    image_tensor = self._prepare_render_data(rendered)
+                                    # Store derivatives if available
+                                    dx = result.get("dx", None)
+                                    dy = result.get("dy", None)
+                                    dxy = result.get("dxy", None)
+                                    
+                                    # Choose what to display based on vis_mode
+                                    if self.vis_mode == 0:
+                                        display_tensor = rendered
+                                        # Prepare tensor for OpenGL
+                                        image_tensor = self._prepare_render_data(display_tensor)
+                                    elif self.vis_mode == 1 and dx is not None:
+                                        display_tensor = dx.float()
+                                        # Use gradient visualization for derivatives
+                                        image_tensor = self._prepare_gradient_data(display_tensor)
+                                    elif self.vis_mode == 2 and dy is not None:
+                                        display_tensor = dy.float()
+                                        # Use gradient visualization for derivatives
+                                        image_tensor = self._prepare_gradient_data(display_tensor)
+                                    elif self.vis_mode == 3 and dxy is not None:
+                                        display_tensor = dxy.float()
+                                        # Use gradient visualization for derivatives
+                                        image_tensor = self._prepare_gradient_data(display_tensor)
+                                    else:
+                                        display_tensor = rendered
+                                        # Fallback to regular rendering
+                                        image_tensor = self._prepare_render_data(display_tensor)
+                                    
                                     self._update_texture(image_tensor)
                                     
                                     # Clear the flag after rendering
@@ -474,6 +540,8 @@ class LIGVisualizer:
                 imgui.set_next_window_position(10, 10)
                 imgui.begin("Info", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_COLLAPSE)
                 imgui.text(f"Mode: {'CUDA' if self.use_cuda else 'CPU'}")
+                imgui.text(f"View: {self.vis_mode_names[self.vis_mode]}")
+                imgui.separator()
                 imgui.text(f"Iteration: {self.current_iter}")
                 imgui.text(f"PSNR: {self.current_psnr:.2f} dB")
                 imgui.text(f"Loss: {self.current_loss:.6f}")
@@ -485,6 +553,7 @@ class LIGVisualizer:
                 imgui.text("LMB - Pan")
                 imgui.text("Scroll - Zoom")
                 imgui.text("R - Reset view")
+                imgui.text("1-4 - Switch view mode")
                 imgui.text("ESC - Exit")
                 imgui.end()
             
