@@ -46,7 +46,7 @@ class SimpleTrainer2d:
 
         if model_name == "LIG":
             from gaussianlig import LIG
-            self.gaussian_model = LIG(loss_type="L2", opt_type="adam", 
+            self.gaussian_model = LIG(loss_type="L2", opt_type="adam",
                                       num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
                                       H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                       device=self.device, lr=args.lr).to(self.device)
@@ -222,6 +222,7 @@ class SimpleTrainer2d:
                         'store_max': self.gaussian_model.store_max, 'store_min': self.gaussian_model.store_min}, self.log_dir / "gaussian_model.pth.tar")
         np.save(self.log_dir / "training.npy", {"iterations": iter_list, "training_psnr": psnr_list, "training_time": end_time, 
         "psnr": psnr_value, "ms-ssim": ms_ssim_value, "rendering_time": test_end_time, "rendering_fps": 1/test_end_time})
+        
         return psnr_value, ms_ssim_value, end_time, test_end_time, 1/test_end_time
 
     def test(self):
@@ -267,7 +268,7 @@ def parse_args(argv):
         "--data_name", type=str, default='DIV2K_valid_HR', help="Training dataset"
     )
     parser.add_argument(
-        "--iterations", type=int, default=30000, help="number of training epochs (default: %(default)s)"
+        "--iterations", type=int, default=15000, help="number of training epochs (default: %(default)s)"
     )
     parser.add_argument(
         "--model_name", type=str, default="LIG", help="model selection: GaussianImage_Cholesky, GaussianImage_RS, 3DGS"
@@ -275,15 +276,19 @@ def parse_args(argv):
     parser.add_argument(
         "--num_points",
         type=int,
-        default=500000,
+        default=150000,
         help="2D GS points (default: %(default)s)",
     )
-    parser.add_argument("--n_scales", type=int, default=2)
+
+    # x:\_ai\_gsplat\datasets\DIV2K_valid_HR\0834.png
+    # x:\_ai\_gsplat\datasets\328220.jpg
+
+    parser.add_argument("--n_scales", type=int, default=4)
     parser.add_argument("--allo_ratio", type=float, default=0.5)
     parser.add_argument("--model_path", type=str, default=None, help="Path to a checkpoint")
     parser.add_argument("--seed", type=float, default=1, help="Set random seed for reproducibility")
+    parser.add_argument("--save_imgs", action="store_true", help="Save image", default=True)
     parser.add_argument("--visualize", action="store_true", help="Enable real-time visualization", default=True)
-    parser.add_argument("--save_imgs", action="store_true", help="Save image")
     parser.add_argument(
         "--lr",
         type=float,
