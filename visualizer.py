@@ -529,80 +529,14 @@ class LIGVisualizer:
                         dy = result.get("dy", None)
                         dxy = result.get("dxy", None)
 
-                        # Choose what to display based on vis_mode
-                        if self.vis_mode == 0:
-                            # Render mode
-                            display_tensor = rendered
-                            image_tensor = self._prepare_render_data(display_tensor)
-                            self._update_texture(image_tensor)
-                        elif self.vis_mode == 1:
-                            # Upscaled mode - use GL shader upscaling
-                            if dx is not None and dy is not None and dxy is not None:
-                                self._update_gradient_textures(dx, dy, dxy)
-                                display_tensor = rendered
-                                image_tensor = self._prepare_render_data(display_tensor)
-                                self._update_texture(image_tensor)
-                                self.use_upscale_shader = True
-                            else:
-                                # Fallback to regular rendering if derivatives not available
-                                display_tensor = rendered
-                                image_tensor = self._prepare_render_data(display_tensor)
-                                self._update_texture(image_tensor)
-                                self.use_upscale_shader = False
-                        elif self.vis_mode == 2:
-                            # Target mode - показываем мелкую картинку
-                            if self.target_image is not None:
-                                self._load_reference_texture(self.target_image, self.texture_target, 'target')
-                        elif self.vis_mode == 3:
-                            # Ground Truth mode
-                            if self.gt_image is not None:
-                                self._load_reference_texture(self.gt_image, self.texture_gt, 'gt')
-                        elif self.vis_mode == 4:
-                            # Gradient mode - показываем градиенты в зависимости от gradient_mode
-                            if self.gradient_mode == 0 and dx is not None:
-                                # dX mode
-                                display_tensor = dx.float()
-                                image_tensor = self._prepare_gradient_tensor(display_tensor)
-                                self._update_texture(image_tensor)
-                                self.use_gradient_shader = True
-                            elif self.gradient_mode == 1 and dy is not None:
-                                # dY mode
-                                display_tensor = dy.float()
-                                image_tensor = self._prepare_gradient_tensor(display_tensor)
-                                self._update_texture(image_tensor)
-                                self.use_gradient_shader = True
-                            elif self.gradient_mode == 2 and dxy is not None:
-                                # dXY mode
-                                display_tensor = dxy.float()
-                                image_tensor = self._prepare_gradient_tensor(display_tensor)
-                                self._update_texture(image_tensor)
-                                self.use_gradient_shader = True
-                            elif self.gradient_mode == 3:
-                                # Magnitude mode
-                                if dx is not None and dy is not None:
-                                    # Update gradient textures for magnitude shader
-                                    self._update_gradient_textures(dx, dy, dxy if dxy is not None else dx)
-                                    # Use rendered image for texture (not used in magnitude shader but needed for consistency)
-                                    display_tensor = rendered
-                                    image_tensor = self._prepare_render_data(display_tensor)
-                                    self._update_texture(image_tensor)
-                                    self.use_magnitude_shader = True
-                                else:
-                                    # Fallback to regular rendering if derivatives not available
-                                    display_tensor = rendered
-                                    image_tensor = self._prepare_render_data(display_tensor)
-                                    self._update_texture(image_tensor)
-                                    self.use_magnitude_shader = False
-                            else:
-                                # Fallback to regular rendering
-                                display_tensor = rendered
-                                image_tensor = self._prepare_render_data(display_tensor)
-                                self._update_texture(image_tensor)
-                        else:
-                            display_tensor = rendered
-                            # Fallback to regular rendering
-                            image_tensor = self._prepare_render_data(display_tensor)
-                            self._update_texture(image_tensor)
+                        # Update display using unified method
+                        render_data = {
+                            "rendered": rendered,
+                            "dx": dx,
+                            "dy": dy,
+                            "dxy": dxy
+                        }
+                        self._update_display_from_tensors(render_data)
 
                         # Clear the flag after rendering
                         self.was_updated = False
@@ -615,7 +549,90 @@ class LIGVisualizer:
             finally:
                 self.e_want_to_render.clear()
                 self.e_finished_rendering.set()
-        
+
+    def _update_display_from_tensors(self, render_data):
+        """Update display textures based on render tensors"""
+        rendered = render_data["rendered"]
+        dx = render_data.get("dx")
+        dy = render_data.get("dy")
+        dxy = render_data.get("dxy")
+
+        # Choose what to display based on vis_mode
+        if self.vis_mode == 0:
+            # Render mode
+            display_tensor = rendered
+            image_tensor = self._prepare_render_data(display_tensor)
+            self._update_texture(image_tensor)
+        elif self.vis_mode == 1:
+            # Upscaled mode - use GL shader upscaling
+            if dx is not None and dy is not None and dxy is not None:
+                self._update_gradient_textures(dx, dy, dxy)
+                display_tensor = rendered
+                image_tensor = self._prepare_render_data(display_tensor)
+                self._update_texture(image_tensor)
+                self.use_upscale_shader = True
+            else:
+                # Fallback to regular rendering if derivatives not available
+                display_tensor = rendered
+                image_tensor = self._prepare_render_data(display_tensor)
+                self._update_texture(image_tensor)
+                self.use_upscale_shader = False
+        elif self.vis_mode == 2:
+            # Target mode - показываем мелкую картинку
+            if self.target_image is not None:
+                self._load_reference_texture(self.target_image, self.texture_target, 'target')
+        elif self.vis_mode == 3:
+            # Ground Truth mode
+            if self.gt_image is not None:
+                self._load_reference_texture(self.gt_image, self.texture_gt, 'gt')
+        elif self.vis_mode == 4:
+            # Gradient mode - показываем градиенты в зависимости от gradient_mode
+            if self.gradient_mode == 0 and dx is not None:
+                # dX mode
+                display_tensor = dx.float()
+                image_tensor = self._prepare_gradient_tensor(display_tensor)
+                self._update_texture(image_tensor)
+                self.use_gradient_shader = True
+            elif self.gradient_mode == 1 and dy is not None:
+                # dY mode
+                display_tensor = dy.float()
+                image_tensor = self._prepare_gradient_tensor(display_tensor)
+                self._update_texture(image_tensor)
+                self.use_gradient_shader = True
+            elif self.gradient_mode == 2 and dxy is not None:
+                # dXY mode
+                display_tensor = dxy.float()
+                image_tensor = self._prepare_gradient_tensor(display_tensor)
+                self._update_texture(image_tensor)
+                self.use_gradient_shader = True
+            elif self.gradient_mode == 3:
+                # Magnitude mode
+                if dx is not None and dy is not None:
+                    # Update gradient textures for magnitude shader
+                    self._update_gradient_textures(dx, dy, dxy if dxy is not None else dx)
+                    # Use rendered image for texture (not used in magnitude shader but needed for consistency)
+                    display_tensor = rendered
+                    image_tensor = self._prepare_render_data(display_tensor)
+                    self._update_texture(image_tensor)
+                    self.use_magnitude_shader = True
+                else:
+                    # Fallback to regular rendering if derivatives not available
+                    display_tensor = rendered
+                    image_tensor = self._prepare_render_data(display_tensor)
+                    self._update_texture(image_tensor)
+                    self.use_magnitude_shader = False
+            else:
+                # Fallback to regular rendering
+                display_tensor = rendered
+                image_tensor = self._prepare_render_data(display_tensor)
+                self._update_texture(image_tensor)
+        else:
+            display_tensor = rendered
+            # Fallback to regular rendering
+            image_tensor = self._prepare_render_data(display_tensor)
+            self._update_texture(image_tensor)
+
+
     def _setup_shader(self):
         """Setup and bind appropriate shader for rendering"""
         # Проверяем наличие данных в зависимости от режима
