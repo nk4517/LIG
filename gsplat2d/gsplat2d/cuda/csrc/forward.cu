@@ -126,6 +126,7 @@ __global__ void rasterize_forward(
     const float3* __restrict__ colors,
     int* __restrict__ final_index,
     float3* __restrict__ out_img,
+    float* __restrict__ out_wsum,
     float3* __restrict__ out_dx,
     float3* __restrict__ out_dy,
     float3* __restrict__ out_dxy
@@ -170,6 +171,7 @@ __global__ void rasterize_forward(
     float3 pix_dx = {0.f, 0.f, 0.f};
     float3 pix_dy = {0.f, 0.f, 0.f};
     float3 pix_dxy = {0.f, 0.f, 0.f};
+    float weighted_alpha = 0.f;
     for (int b = 0; b < num_batches; ++b) {
         // resync all threads before beginning next batch
         // end early if entire tile is done
@@ -250,6 +252,9 @@ __global__ void rasterize_forward(
             pix_dxy.y += c.y * d2_alpha_dxdy;
             pix_dxy.z += c.z * d2_alpha_dxdy;
             
+            // Accumulate weighted sum of alphas
+            weighted_alpha += alpha;
+            
             cur_idx = batch_start + t;
         }
     }
@@ -258,6 +263,7 @@ __global__ void rasterize_forward(
         final_index[pix_id] =
             cur_idx; // index of in bin of last gaussian in this pixel
         out_img[pix_id] = pix_out;
+        out_wsum[pix_id] = weighted_alpha;
         out_dx[pix_id] = pix_dx;
         out_dy[pix_id] = pix_dy;
         out_dxy[pix_id] = pix_dxy;

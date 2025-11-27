@@ -69,6 +69,7 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
+    torch::Tensor,
     torch::Tensor
 > rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
@@ -98,5 +99,6 @@ std::
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &final_idx,
-        const torch::Tensor &v_output
+        const torch::Tensor &v_output,
+        const torch::Tensor &v_render_wsum
     );

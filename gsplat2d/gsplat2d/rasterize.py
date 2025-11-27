@@ -18,8 +18,7 @@ def rasterize_gaussians(
     img_height: int,
     img_width: int,
     block_width: int,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     assert block_width > 1 and block_width <= 16, "block_width must be between 2 and 16"
     if colors.dtype == torch.uint8:
         colors = colors.float() / 255
@@ -56,7 +55,7 @@ class _RasterizeGaussians(Function):
         img_height: int,
         img_width: int,
         block_width: int,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         num_points = xys.size(0)
         tile_bounds = (
             (img_width + block_width - 1) // block_width,
@@ -74,6 +73,7 @@ class _RasterizeGaussians(Function):
             out_img = (
                 torch.ones(img_height, img_width, colors.shape[-1], device=xys.device)
             )
+            out_wsum = torch.zeros(img_height, img_width, device=xys.device)
             out_dx = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
             out_dy = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
             out_dxy = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
@@ -98,8 +98,7 @@ class _RasterizeGaussians(Function):
                 block_width,
             )
             rasterize_fn = _C.rasterize_forward
-            
-            out_img, final_idx, out_dx, out_dy, out_dxy = rasterize_fn(
+            out_img, final_idx, out_wsum, out_dx, out_dy, out_dxy = rasterize_fn(
                 tile_bounds,
                 block,
                 img_size,
@@ -123,10 +122,10 @@ class _RasterizeGaussians(Function):
             final_idx,
         )
 
-        return out_img, out_dx, out_dy, out_dxy
+        return out_img, out_wsum, out_dx, out_dy, out_dxy
 
     @staticmethod
-    def backward(ctx, v_out_img, v_out_dx, v_out_dy, v_out_dxy):
+    def backward(ctx, v_out_img, v_out_wsum, v_out_dx, v_out_dy, v_out_dxy):
         img_height = ctx.img_height
         img_width = ctx.img_width
         num_intersects = ctx.num_intersects
@@ -160,6 +159,7 @@ class _RasterizeGaussians(Function):
                 colors,
                 final_idx,
                 v_out_img,
+                v_out_wsum,
             )
 
         xys.absgrad = v_xy_abs

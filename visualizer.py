@@ -553,6 +553,7 @@ class LIGVisualizer:
     def _update_display_from_tensors(self, render_data):
         """Update display textures based on render tensors"""
         rendered = render_data["rendered"]
+        wsum = render_data.get("wsum")
         dx = render_data.get("dx")
         dy = render_data.get("dy")
         dxy = render_data.get("dxy")
