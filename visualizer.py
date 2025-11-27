@@ -160,54 +160,27 @@ class LIGVisualizer:
         self.magnitude_program = compile_shaders(vertex_source, magnitude_fragment)
         self.vao = gl.glGenVertexArrays(1)
         
-        self.texture = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-        
-        # Инициализация текстур для градиентов
-        self.texture_dx = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-        
-        self.texture_dy = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-        
-        self.texture_dxy = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dxy)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-        
-        # Инициализация текстуры для target image
-        self.texture_target = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_target)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-        
-        # Инициализация текстуры для ground truth
-        self.texture_gt = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_gt)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        # Создаём все текстуры
+        self.texture = self._create_texture()
+        self.texture_dx = self._create_texture()
+        self.texture_dy = self._create_texture()
+        self.texture_dxy = self._create_texture()
+        self.texture_target = self._create_texture()
+        self.texture_gt = self._create_texture()
         
         self._init_cuda_interop()
         
         glfw.swap_interval(2)
+        
+    def _create_texture(self):
+        """Create and configure a texture with standard parameters"""
+        texture = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        return texture
         
     def _init_cuda_interop(self):
         """Initialize CUDA-OpenGL interop if available and enabled"""
@@ -337,29 +310,6 @@ class LIGVisualizer:
         self.current_psnr = psnr
         self.current_loss = loss
         
-    def _prepare_gradient_data(self, gradient):
-        """Prepare gradient tensor for visualization - just normalize and convert to RGBA"""
-        # Handle different tensor dimensions
-        if gradient.dim() == 4:
-            gradient = gradient.squeeze(0)
-        
-        if gradient.dim() == 3:
-            # CHW to HWC
-            gradient = gradient.permute(1, 2, 0)
-        else:
-            # Single channel - replicate to RGB
-            gradient = gradient.unsqueeze(-1)
-            gradient = gradient.repeat(1, 1, 3)
-        
-        # Add alpha channel
-        if gradient.shape[2] == 3:
-            alpha = torch.ones((*gradient.shape[:2], 1), 
-                              dtype=gradient.dtype, 
-                              device=gradient.device)
-            gradient = torch.cat([gradient, alpha], dim=2)
-        
-        return gradient
-        
     def _prepare_render_data(self, rendered):
         """Prepare rendered tensor for texture update"""
         # Handle different tensor dimensions
@@ -487,39 +437,20 @@ class LIGVisualizer:
     
     def _update_gradient_textures(self, dx, dy, dxy):
         """Обновление текстур градиентов для апскейлинга"""
-        # Подготовка тензоров градиентов
-        dx_tensor = self._prepare_gradient_tensor(dx)
-        dy_tensor = self._prepare_gradient_tensor(dy)
-        dxy_tensor = self._prepare_gradient_tensor(dxy)
+        gradients = [
+            (self.texture_dx, dx),
+            (self.texture_dy, dy),
+            (self.texture_dxy, dxy)
+        ]
         
-        h, w = dx_tensor.shape[:2]
-        
-        # Обновление текстуры dx
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
-        if dx_tensor.is_cuda:
-            dx_np = dx_tensor.detach().cpu().numpy()
-        else:
-            dx_np = dx_tensor.numpy()
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
-                       gl.GL_RGBA, gl.GL_FLOAT, dx_np)
-        
-        # Обновление текстуры dy
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
-        if dy_tensor.is_cuda:
-            dy_np = dy_tensor.detach().cpu().numpy()
-        else:
-            dy_np = dy_tensor.numpy()
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
-                       gl.GL_RGBA, gl.GL_FLOAT, dy_np)
-        
-        # Обновление текстуры dxy
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dxy)
-        if dxy_tensor.is_cuda:
-            dxy_np = dxy_tensor.detach().cpu().numpy()
-        else:
-            dxy_np = dxy_tensor.numpy()
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
-                       gl.GL_RGBA, gl.GL_FLOAT, dxy_np)
+        for texture, gradient in gradients:
+            tensor = self._prepare_gradient_tensor(gradient)
+            h, w = tensor.shape[:2]
+            
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+            np_data = tensor.detach().cpu().numpy() if tensor.is_cuda else tensor.numpy()
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
+                           gl.GL_RGBA, gl.GL_FLOAT, np_data)
         
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
     
@@ -531,6 +462,13 @@ class LIGVisualizer:
         if gradient.dim() == 3:
             # CHW -> HWC
             gradient = gradient.permute(1, 2, 0)
+        elif gradient.dim() == 2:
+            # Single channel - add channel dimension
+            gradient = gradient.unsqueeze(-1)
+        
+        # Ensure RGB (replicate single channel if needed)
+        if gradient.shape[2] == 1:
+            gradient = gradient.repeat(1, 1, 3)
         
         # Добавляем альфа-канал если нужно
         if gradient.shape[2] == 3:
@@ -541,6 +479,29 @@ class LIGVisualizer:
         
         return gradient
         
+    def _load_reference_texture(self, image, texture, mode):
+        """Load reference texture (target or gt) if not already loaded"""
+        # Check if already loaded
+        width_attr = f'{mode}_width'
+        height_attr = f'{mode}_height'
+        
+        if getattr(self, width_attr) == 1:  # Not loaded yet
+            tensor = self._prepare_render_data(image)
+            h, w = tensor.shape[:2]
+            setattr(self, width_attr, w)
+            setattr(self, height_attr, h)
+            
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+            np_data = tensor.detach().cpu().numpy() if tensor.is_cuda else tensor.numpy()
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
+                           gl.GL_RGBA, gl.GL_FLOAT, np_data)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        
+        # Update display dimensions
+        self.image_width = getattr(self, width_attr)
+        self.image_height = getattr(self, height_attr)
+        self.image_aspect = self.image_width / self.image_height if self.image_height > 0 else 1.0
+
     def _render_model(self):
         """Render the gaussian model and update textures"""
         if self.gaussian_model is None or not self.was_updated:
@@ -591,67 +552,29 @@ class LIGVisualizer:
                         elif self.vis_mode == 2:
                             # Target mode - показываем мелкую картинку
                             if self.target_image is not None:
-                                # Загружаем текстуру при первом обращении
-                                if self.target_width == 1:  # Признак что текстура ещё не загружена
-                                    target_tensor = self._prepare_render_data(self.target_image)
-                                    h, w = target_tensor.shape[:2]
-                                    self.target_width = w
-                                    self.target_height = h
-                                    
-                                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_target)
-                                    if target_tensor.is_cuda:
-                                        target_np = target_tensor.detach().cpu().numpy()
-                                    else:
-                                        target_np = target_tensor.numpy()
-                                    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
-                                                   gl.GL_RGBA, gl.GL_FLOAT, target_np)
-                                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-                                
-                                # Обновляем размеры для правильного отображения
-                                self.image_width = self.target_width
-                                self.image_height = self.target_height
-                                self.image_aspect = self.target_width / self.target_height if self.target_height > 0 else 1.0
+                                self._load_reference_texture(self.target_image, self.texture_target, 'target')
                         elif self.vis_mode == 3:
                             # Ground Truth mode
                             if self.gt_image is not None:
-                                # Загружаем текстуру при первом обращении
-                                if self.gt_width == 1:  # Признак что текстура ещё не загружена
-                                    gt_tensor = self._prepare_render_data(self.gt_image)
-                                    h, w = gt_tensor.shape[:2]
-                                    self.gt_width = w
-                                    self.gt_height = h
-                                    
-                                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_gt)
-                                    if gt_tensor.is_cuda:
-                                        gt_np = gt_tensor.detach().cpu().numpy()
-                                    else:
-                                        gt_np = gt_tensor.numpy()
-                                    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0,
-                                                   gl.GL_RGBA, gl.GL_FLOAT, gt_np)
-                                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-                                
-                                # Обновляем размеры для правильного отображения
-                                self.image_width = self.gt_width
-                                self.image_height = self.gt_height
-                                self.image_aspect = self.gt_width / self.gt_height if self.gt_height > 0 else 1.0
+                                self._load_reference_texture(self.gt_image, self.texture_gt, 'gt')
                         elif self.vis_mode == 4:
                             # Gradient mode - показываем градиенты в зависимости от gradient_mode
                             if self.gradient_mode == 0 and dx is not None:
                                 # dX mode
                                 display_tensor = dx.float()
-                                image_tensor = self._prepare_gradient_data(display_tensor)
+                                image_tensor = self._prepare_gradient_tensor(display_tensor)
                                 self._update_texture(image_tensor)
                                 self.use_gradient_shader = True
                             elif self.gradient_mode == 1 and dy is not None:
                                 # dY mode
                                 display_tensor = dy.float()
-                                image_tensor = self._prepare_gradient_data(display_tensor)
+                                image_tensor = self._prepare_gradient_tensor(display_tensor)
                                 self._update_texture(image_tensor)
                                 self.use_gradient_shader = True
                             elif self.gradient_mode == 2 and dxy is not None:
                                 # dXY mode
                                 display_tensor = dxy.float()
-                                image_tensor = self._prepare_gradient_data(display_tensor)
+                                image_tensor = self._prepare_gradient_tensor(display_tensor)
                                 self._update_texture(image_tensor)
                                 self.use_gradient_shader = True
                             elif self.gradient_mode == 3:
@@ -838,32 +761,16 @@ class LIGVisualizer:
         imgui.separator()
         
         # Zoom slider - общий для всех режимов
-        # В режиме upscale показываем как "Upscaler zoom"
-        if self.vis_mode == 1:
-            display_zoom = self.zoom
-            changed, self.zoom = imgui.slider_float(
-                "Upscaler zoom", 
-                self.zoom, 
-                0.1, 
-                10.0,
-                f"{display_zoom:.2f}x"
-            )
-            # При ручном изменении зума отключаем fit_to_window
-            if changed:
-                self.fit_to_window = False
-        else:
-            display_zoom = self.zoom
-            
-            changed, self.zoom = imgui.slider_float(
-                "Zoom", 
-                self.zoom, 
-                0.1, 
-                10.0,
-                f"{display_zoom:.2f}x"
-            )
-            # При ручном изменении зума отключаем fit_to_window
-            if changed:
-                self.fit_to_window = False
+        label = "Upscaler zoom" if self.vis_mode == 1 else "Zoom"
+        changed, self.zoom = imgui.slider_float(
+            label, 
+            self.zoom, 
+            0.1, 
+            10.0,
+            f"{self.zoom:.2f}x"
+        )
+        if changed:
+            self.fit_to_window = False
             
         if imgui.is_item_hovered():
             imgui.set_tooltip("Zoom level (also controlled by mouse wheel)")

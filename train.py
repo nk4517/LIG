@@ -285,7 +285,7 @@ def parse_args(argv):
     parser.add_argument(
         "--num_points",
         type=int,
-        default=250000,
+        default=500000,
         help="2D GS points (default: %(default)s)",
     )
 
