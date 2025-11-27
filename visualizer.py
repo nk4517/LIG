@@ -92,13 +92,16 @@ class LIGVisualizer:
         
         # Visualization mode: 0=render, 1=dx, 2=dy, 3=dxy
         self.vis_mode = 0
-        self.vis_mode_names = ["Render", "dX", "dY", "dXY", "Upscaled", "Upscaled 1:1", "Original 1:1"]
+        self.vis_mode_names = ["Render", "dX", "dY", "dXY", "Upscaled"]
         self.pixel_perfect = False  # Flag for pixel-perfect rendering
         
         # Флаги для апскейлинга
         self.use_upscale_shader = False
         self.upscale_factor = 2
         self.use_gradient_shader = False
+        
+        # Upscale settings
+        self.upscale_factor_setting = 2.0
         
     def init(self):
         if not glfw.init():
@@ -249,11 +252,9 @@ class LIGVisualizer:
                 self.pan_x = 0.0
                 self.pan_y = 0.0
                 self.zoom = 1.0
-            elif key >= glfw.KEY_1 and key <= glfw.KEY_7:
-                # Switch visualization mode with keys 1-7
+            elif key >= glfw.KEY_1 and key <= glfw.KEY_5:
+                # Switch visualization mode with keys 1-5
                 self.vis_mode = key - glfw.KEY_1
-                # Reset pixel_perfect flag when switching modes
-                self.pixel_perfect = False
             elif key == glfw.KEY_ESCAPE:
                 glfw.set_window_should_close(self.window, True)
                 
@@ -467,6 +468,221 @@ class LIGVisualizer:
         
         return gradient
         
+    def _render_model(self):
+        """Render the gaussian model and update textures"""
+        if self.gaussian_model is None or not self.was_updated:
+            return
+
+        self.e_finished_rendering.clear()
+        self.e_want_to_render.set()
+
+        with self.lock:
+            try:
+                with torch.no_grad():
+                    # Check if model is on CUDA before rendering
+                    first_param = next(self.gaussian_model.parameters(), None)
+                    if first_param is not None and first_param.is_cuda:
+                        # Render the current state without changing model mode
+                        result = self.gaussian_model()
+                        rendered = result["render"].float()
+
+                        # Store derivatives if available
+                        dx = result.get("dx", None)
+                        dy = result.get("dy", None)
+                        dxy = result.get("dxy", None)
+
+                        # Choose what to display based on vis_mode
+                        if self.vis_mode == 0:
+                            display_tensor = rendered
+                            image_tensor = self._prepare_render_data(display_tensor)
+                            self._update_texture(image_tensor)
+                        elif self.vis_mode == 1 and dx is not None:
+                            display_tensor = dx.float()
+                            image_tensor = self._prepare_gradient_data(display_tensor)
+                            self._update_texture(image_tensor)
+                            self.use_gradient_shader = True
+                        elif self.vis_mode == 2 and dy is not None:
+                            display_tensor = dy.float()
+                            image_tensor = self._prepare_gradient_data(display_tensor)
+                            self._update_texture(image_tensor)
+                            self.use_gradient_shader = True
+                        elif self.vis_mode == 3 and dxy is not None:
+                            display_tensor = dxy.float()
+                            image_tensor = self._prepare_gradient_data(display_tensor)
+                            self._update_texture(image_tensor)
+                            self.use_gradient_shader = True
+                        elif self.vis_mode == 4:
+                            # Upscaled mode - use GL shader upscaling
+                            if dx is not None and dy is not None and dxy is not None:
+                                self._update_gradient_textures(dx, dy, dxy)
+                                display_tensor = rendered
+                                image_tensor = self._prepare_render_data(display_tensor)
+                                self._update_texture(image_tensor)
+                                self.use_upscale_shader = True
+                                self.upscale_factor = self.upscale_factor_setting
+                            else:
+                                # Fallback to regular rendering if derivatives not available
+                                display_tensor = rendered
+                                image_tensor = self._prepare_render_data(display_tensor)
+                                self._update_texture(image_tensor)
+                                self.use_upscale_shader = False
+                        else:
+                            display_tensor = rendered
+                            # Fallback to regular rendering
+                            image_tensor = self._prepare_render_data(display_tensor)
+                            self._update_texture(image_tensor)
+
+                        # Clear the flag after rendering
+                        self.was_updated = False
+                    else:
+                        # Model is on CPU, skip rendering but clear flag
+                        self.was_updated = False
+
+            except Exception as e:
+                print(f"Render error: {e}")
+            finally:
+                self.e_want_to_render.clear()
+                self.e_finished_rendering.set()
+        
+    def _setup_shader(self):
+        """Setup and bind appropriate shader for rendering"""
+        if self.current_image is None:
+            return
+            
+        if self.use_upscale_shader:
+            gl.glUseProgram(self.upscale_program)
+            
+            # Устанавливаем униформы для апскейлинга
+            gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "source_size"), 
+                          float(self.image_width), float(self.image_height))
+            gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "target_size"), 
+                          float(self.image_width * self.upscale_factor), 
+                          float(self.image_height * self.upscale_factor))
+            gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "pan"), self.pan_x, self.pan_y)
+            gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "zoom"), self.zoom)
+            gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "window_aspect"), self.aspect)
+            gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "image_aspect"), self.image_aspect)
+            gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+            gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "window_size"), float(self.width), float(self.height))
+            
+            # Привязываем текстуры
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
+            gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texRender"), 0)
+            
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
+            gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDx"), 1)
+            
+            gl.glActiveTexture(gl.GL_TEXTURE2)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
+            gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDy"), 2)
+            
+            gl.glActiveTexture(gl.GL_TEXTURE3)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dxy)
+            gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDxy"), 3)
+            
+            # Сбрасываем флаг после использования
+            self.use_upscale_shader = False
+        elif self.use_gradient_shader:
+            gl.glUseProgram(self.gradient_program)
+            gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "pan"), self.pan_x, self.pan_y)
+            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "zoom"), self.zoom)
+            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "window_aspect"), self.aspect)
+            gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "image_aspect"), self.image_aspect)
+            gl.glUniform1i(gl.glGetUniformLocation(self.gradient_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+            gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "window_size"), float(self.width), float(self.height))
+            gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "texture_size"), float(self.image_width), float(self.image_height))
+            
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
+            
+            # Сбрасываем флаг после использования
+            self.use_gradient_shader = False
+        else:
+            gl.glUseProgram(self.program)
+            gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), self.pan_x, self.pan_y)
+            gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), self.zoom)
+            gl.glUniform1f(gl.glGetUniformLocation(self.program, "window_aspect"), self.aspect)
+            gl.glUniform1f(gl.glGetUniformLocation(self.program, "image_aspect"), self.image_aspect)
+            gl.glUniform1i(gl.glGetUniformLocation(self.program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
+            gl.glUniform2f(gl.glGetUniformLocation(self.program, "window_size"), float(self.width), float(self.height))
+            gl.glUniform2f(gl.glGetUniformLocation(self.program, "texture_size"), float(self.image_width), float(self.image_height))
+            
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
+        
+    def _draw_gui(self):
+        """Draw ImGui interface"""
+        if not self.show_info:
+            return
+            
+        # Settings panel - верхний правый угол
+        imgui.set_next_window_position(self.width - 320, 10)
+        imgui.set_next_window_size(300, 250)
+        imgui.begin("Settings")
+        
+        # Pixel perfect checkbox
+        changed, self.pixel_perfect = imgui.checkbox("Pixel Perfect", self.pixel_perfect)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip("Toggle between stretch to window and 1:1 pixel rendering")
+        
+        imgui.separator()
+        
+        # Display mode radio buttons
+        imgui.text("Display:")
+        
+        if imgui.radio_button("Image [1]", self.vis_mode == 0):
+            self.vis_mode = 0
+        imgui.same_line()
+        if imgui.radio_button("dX [2]", self.vis_mode == 1):
+            self.vis_mode = 1
+        
+        if imgui.radio_button("dY [3]", self.vis_mode == 2):
+            self.vis_mode = 2
+        imgui.same_line()
+        if imgui.radio_button("dXY [4]", self.vis_mode == 3):
+            self.vis_mode = 3
+        
+        if imgui.radio_button("Upscaled [5]", self.vis_mode == 4):
+            self.vis_mode = 4
+        
+        imgui.separator()
+        
+        # Upscale factor slider (only show when in Upscaled mode)
+        if self.vis_mode == 4:
+            changed, self.upscale_factor_setting = imgui.slider_float(
+                "Upscale Factor", 
+                self.upscale_factor_setting, 
+                0.25, 
+                8.0,
+                "%.2f"
+            )
+        
+        imgui.end()
+        
+        # Info panel - нижний правый угол
+        imgui.set_next_window_position(self.width - 320, self.height - 360)
+        imgui.set_next_window_size(300, 350)
+        imgui.begin("Info")
+        imgui.text(f"Mode: {'CUDA' if self.use_cuda else 'CPU'}")
+        imgui.text(f"View: {self.vis_mode_names[self.vis_mode]}")
+        imgui.separator()
+        imgui.text(f"Iteration: {self.current_iter}")
+        imgui.text(f"PSNR: {self.current_psnr:.2f} dB")
+        imgui.text(f"Loss: {self.current_loss:.6f}")
+        imgui.separator()
+        imgui.text(f"Zoom: {self.zoom:.2f}x")
+        imgui.text(f"Pan: ({self.pan_x:.3f}, {self.pan_y:.3f})")
+        imgui.separator()
+        imgui.text("Controls:")
+        imgui.text("LMB - Pan")
+        imgui.text("Scroll - Zoom")
+        imgui.text("R - Reset view")
+        imgui.text("1-5 - Switch view mode")
+        imgui.text("ESC - Exit")
+        imgui.end()
+        
     def main_loop(self):
         while not glfw.window_should_close(self.window):
             glfw.poll_events()
@@ -476,213 +692,18 @@ class LIGVisualizer:
             gl.glClearColor(0.1, 0.1, 0.1, 1.0)
             gl.glClear(gl.GL_COLOR_BUFFER_BIT)
             
-            # Check if we need to render
-            if self.gaussian_model is not None:
-                # Check if model was updated
-                if self.was_updated:
-                    self.e_finished_rendering.clear()
-                    self.e_want_to_render.set()
-                    
-                    with self.lock:
-                        try:
-                            with torch.no_grad():
-                                # Check if model is on CUDA before rendering
-                                # Get first parameter to check device
-                                first_param = next(self.gaussian_model.parameters(), None)
-                                if first_param is not None and first_param.is_cuda:
-                                    # Render the current state without changing model mode
-                                    result = self.gaussian_model()
-                                    rendered = result["render"].float()
-                                    
-                                    # Store derivatives if available
-                                    dx = result.get("dx", None)
-                                    dy = result.get("dy", None)
-                                    dxy = result.get("dxy", None)
-                                    
-                                    # Choose what to display based on vis_mode
-                                    if self.vis_mode == 0:
-                                        display_tensor = rendered
-                                        # Prepare tensor for OpenGL
-                                        image_tensor = self._prepare_render_data(display_tensor)
-                                    elif self.vis_mode == 1 and dx is not None:
-                                        display_tensor = dx.float()
-                                        # Use gradient visualization shader
-                                        image_tensor = self._prepare_gradient_data(display_tensor)
-                                        self._update_texture(image_tensor)
-                                        self.use_gradient_shader = True
-                                    elif self.vis_mode == 2 and dy is not None:
-                                        display_tensor = dy.float()
-                                        # Use gradient visualization shader
-                                        image_tensor = self._prepare_gradient_data(display_tensor)
-                                        self._update_texture(image_tensor)
-                                        self.use_gradient_shader = True
-                                    elif self.vis_mode == 3 and dxy is not None:
-                                        display_tensor = dxy.float()
-                                        # Use gradient visualization shader
-                                        image_tensor = self._prepare_gradient_data(display_tensor)
-                                        self._update_texture(image_tensor)
-                                        self.use_gradient_shader = True
-                                    elif self.vis_mode == 4:
-                                        # Upscaled mode - use GL shader upscaling
-                                        if dx is not None and dy is not None and dxy is not None:
-                                            # Обновляем текстуры градиентов
-                                            self._update_gradient_textures(dx, dy, dxy)
-                                            
-                                            # Обновляем основную текстуру
-                                            display_tensor = rendered
-                                            image_tensor = self._prepare_render_data(display_tensor)
-                                            self._update_texture(image_tensor)
-                                            
-                                            # Флаг для использования upscale шейдера
-                                            self.use_upscale_shader = True
-                                            self.upscale_factor = 2
-                                        else:
-                                            # Fallback to regular rendering if derivatives not available
-                                            display_tensor = rendered
-                                            image_tensor = self._prepare_render_data(display_tensor)
-                                            self._update_texture(image_tensor)
-                                            self.use_upscale_shader = False
-                                    elif self.vis_mode == 5:
-                                        # Upscaled 1:1 pixel perfect mode
-                                        if dx is not None and dy is not None and dxy is not None:
-                                            # Обновляем текстуры градиентов
-                                            self._update_gradient_textures(dx, dy, dxy)
-                                            
-                                            # Обновляем основную текстуру
-                                            display_tensor = rendered
-                                            image_tensor = self._prepare_render_data(display_tensor)
-                                            self._update_texture(image_tensor)
-                                            
-                                            # Флаг для использования upscale шейдера
-                                            self.use_upscale_shader = True
-                                            self.upscale_factor = 3
-                                            self.pixel_perfect = True
-                                        else:
-                                            # Fallback to regular rendering if derivatives not available
-                                            display_tensor = rendered
-                                            image_tensor = self._prepare_render_data(display_tensor)
-                                            self._update_texture(image_tensor)
-                                            self.use_upscale_shader = False
-                                            self.pixel_perfect = False
-                                    elif self.vis_mode == 6:
-                                        # Original 1:1 pixel perfect mode
-                                        display_tensor = rendered
-                                        image_tensor = self._prepare_render_data(display_tensor)
-                                        self._update_texture(image_tensor)
-                                        self.pixel_perfect = True
-                                    else:
-                                        display_tensor = rendered
-                                        # Fallback to regular rendering
-                                        image_tensor = self._prepare_render_data(display_tensor)
-                                        self._update_texture(image_tensor)
-                                        self.pixel_perfect = False
-                                    
-                                    # Обновляем текстуру только если это не было сделано в режимах 1-6
-                                    if self.vis_mode == 0:
-                                        self._update_texture(image_tensor)
-                                    
-                                    # Clear the flag after rendering
-                                    self.was_updated = False
-                                else:
-                                    # Model is on CPU, skip rendering but clear flag
-                                    self.was_updated = False
-                                
-                        except Exception as e:
-                            print(f"Render error: {e}")
-                        finally:
-                            self.e_want_to_render.clear()
-                            self.e_finished_rendering.set()
+            # Render model if needed
+            self._render_model()
             
             # Render image
             if self.current_image is not None:
-                # Выбираем правильный шейдер
-                if self.use_upscale_shader:
-                    gl.glUseProgram(self.upscale_program)
-                    
-                    # Устанавливаем униформы для апскейлинга
-                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "source_size"), 
-                                  float(self.image_width), float(self.image_height))
-                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "target_size"), 
-                                  float(self.image_width * self.upscale_factor), 
-                                  float(self.image_height * self.upscale_factor))
-                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "pan"), self.pan_x, self.pan_y)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "zoom"), self.zoom)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "window_aspect"), self.aspect)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.upscale_program, "image_aspect"), self.image_aspect)
-                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
-                    gl.glUniform2f(gl.glGetUniformLocation(self.upscale_program, "window_size"), float(self.width), float(self.height))
-                    
-                    # Привязываем текстуры
-                    gl.glActiveTexture(gl.GL_TEXTURE0)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
-                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texRender"), 0)
-                    
-                    gl.glActiveTexture(gl.GL_TEXTURE1)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dx)
-                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDx"), 1)
-                    
-                    gl.glActiveTexture(gl.GL_TEXTURE2)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dy)
-                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDy"), 2)
-                    
-                    gl.glActiveTexture(gl.GL_TEXTURE3)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_dxy)
-                    gl.glUniform1i(gl.glGetUniformLocation(self.upscale_program, "texDxy"), 3)
-                    
-                    # Сбрасываем флаг после использования
-                    self.use_upscale_shader = False
-                elif self.use_gradient_shader:
-                    gl.glUseProgram(self.gradient_program)
-                    gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "pan"), self.pan_x, self.pan_y)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "zoom"), self.zoom)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "window_aspect"), self.aspect)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.gradient_program, "image_aspect"), self.image_aspect)
-                    gl.glUniform1i(gl.glGetUniformLocation(self.gradient_program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
-                    gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "window_size"), float(self.width), float(self.height))
-                    gl.glUniform2f(gl.glGetUniformLocation(self.gradient_program, "texture_size"), float(self.image_width), float(self.image_height))
-                    
-                    gl.glActiveTexture(gl.GL_TEXTURE0)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
-                    
-                    # Сбрасываем флаг после использования
-                    self.use_gradient_shader = False
-                else:
-                    gl.glUseProgram(self.program)
-                    gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), self.pan_x, self.pan_y)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.program, "zoom"), self.zoom)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.program, "window_aspect"), self.aspect)
-                    gl.glUniform1f(gl.glGetUniformLocation(self.program, "image_aspect"), self.image_aspect)
-                    gl.glUniform1i(gl.glGetUniformLocation(self.program, "pixel_perfect"), 1 if self.pixel_perfect else 0)
-                    gl.glUniform2f(gl.glGetUniformLocation(self.program, "window_size"), float(self.width), float(self.height))
-                    gl.glUniform2f(gl.glGetUniformLocation(self.program, "texture_size"), float(self.image_width), float(self.image_height))
-                    
-                    gl.glActiveTexture(gl.GL_TEXTURE0)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
-                
+                self._setup_shader()
                 gl.glBindVertexArray(self.vao)
                 gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
             
             # GUI
-            if self.show_info:
-                imgui.set_next_window_position(10, 10)
-                imgui.begin("Info", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_COLLAPSE)
-                imgui.text(f"Mode: {'CUDA' if self.use_cuda else 'CPU'}")
-                imgui.text(f"View: {self.vis_mode_names[self.vis_mode]}")
-                imgui.separator()
-                imgui.text(f"Iteration: {self.current_iter}")
-                imgui.text(f"PSNR: {self.current_psnr:.2f} dB")
-                imgui.text(f"Loss: {self.current_loss:.6f}")
-                imgui.separator()
-                imgui.text(f"Zoom: {self.zoom:.2f}x")
-                imgui.text(f"Pan: ({self.pan_x:.3f}, {self.pan_y:.3f})")
-                imgui.separator()
-                imgui.text("Controls:")
-                imgui.text("LMB - Pan")
-                imgui.text("Scroll - Zoom")
-                imgui.text("R - Reset view")
-                imgui.text("1-7 - Switch view mode")
-                imgui.text("ESC - Exit")
-                imgui.end()
+            # GUI
+            self._draw_gui()
             
             imgui.render()
             self.impl.render(imgui.get_draw_data())
