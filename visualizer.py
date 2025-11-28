@@ -97,6 +97,8 @@ class LIGVisualizer:
         self.texture_dy = None
         self.texture_dxy = None
         self.upscale_program = None
+        self.viridis_program = None
+        self.texture_wsum = None
         
         # Flag for visualization updates
         self.was_updated = False
@@ -107,16 +109,17 @@ class LIGVisualizer:
         self.current_loss = 0.0
         self.use_magnitude_shader = False
         
-        # Visualization mode: 0=render, 1=upscaled, 2=target, 3=ground_truth, 4=gradients
+        # Visualization mode: 0=render, 1=upscaled, 2=target, 3=ground_truth, 4=gradients, 5=wsum
         self.vis_mode = 0
         self.gradient_mode = 0  # 0=dx, 1=dy, 2=dxy, 3=magnitude (для vis_mode==4)
-        self.vis_mode_names = ["Render", "Upscaled", "Target", "Ground Truth", "Gradients"]
+        self.vis_mode_names = ["Render", "Upscaled", "Target", "Ground Truth", "Gradients", "Wsum"]
         self.gradient_mode_names = ["dX", "dY", "dXY", "Magnitude"]
         
         # Флаги для апскейлинга
         self.use_upscale_shader = False
         self.use_gradient_shader = False
         self.use_magnitude_shader = False
+        self.use_viridis_shader = False
         
     def init(self):
         if not glfw.init():
@@ -153,11 +156,13 @@ class LIGVisualizer:
         gradient_fragment = load_shader(shader_dir / "gradient.frag")
         upscale_fragment = load_shader(shader_dir / "upscale.frag")
         magnitude_fragment = load_shader(shader_dir / "magnitude.frag")
+        viridis_fragment = load_shader(shader_dir / "viridis.frag")
         
         self.program = compile_shaders(vertex_source, texture_fragment)
         self.upscale_program = compile_shaders(vertex_source, upscale_fragment)
         self.gradient_program = compile_shaders(vertex_source, gradient_fragment)
         self.magnitude_program = compile_shaders(vertex_source, magnitude_fragment)
+        self.viridis_program = compile_shaders(vertex_source, viridis_fragment)
         self.vao = gl.glGenVertexArrays(1)
         
         # Создаём все текстуры
@@ -167,6 +172,7 @@ class LIGVisualizer:
         self.texture_dxy = self._create_texture()
         self.texture_target = self._create_texture()
         self.texture_gt = self._create_texture()
+        self.texture_wsum = self._create_texture()
         
         self._init_cuda_interop()
         
@@ -284,6 +290,8 @@ class LIGVisualizer:
                 else:
                     # Циклическое переключение между dx, dy, dxy, magnitude
                     self.gradient_mode = (self.gradient_mode + 1) % 4
+            elif key == glfw.KEY_6:
+                self.vis_mode = 5  # Wsum
             elif key == glfw.KEY_0:
                 # Установка zoom в 1.0
                 self.zoom = 1.0
@@ -454,6 +462,30 @@ class LIGVisualizer:
         
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
     
+    def _update_wsum_texture(self, wsum):
+        """Обновление текстуры wsum с нормализацией по 1 и 99 перцентилю"""
+        if wsum.dim() == 4:
+            wsum = wsum.squeeze(0)
+        
+        if wsum.dim() == 3:
+            wsum = wsum.mean(dim=0)
+        
+        # Нормализация по перцентилям
+        p1 = torch.quantile(wsum.flatten(), 0.01)
+        p99 = torch.quantile(wsum.flatten(), 0.99)
+        wsum_norm = (wsum - p1) / (p99 - p1 + 1e-8)
+        wsum_norm = torch.clamp(wsum_norm, 0, 1)
+        
+        # Преобразование в RGBA
+        wsum_rgba = wsum_norm.unsqueeze(-1).repeat(1, 1, 4)
+        wsum_rgba[..., 3] = 1.0
+        
+        h, w = wsum_rgba.shape[:2]
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_wsum)
+        np_data = wsum_rgba.detach().cpu().numpy() if wsum_rgba.is_cuda else wsum_rgba.numpy()
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA32F, w, h, 0, gl.GL_RGBA, gl.GL_FLOAT, np_data)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+    
     def _prepare_gradient_tensor(self, gradient):
         """Подготовка тензора градиента для текстуры"""
         if gradient.dim() == 4:
@@ -528,13 +560,15 @@ class LIGVisualizer:
                         dx = result.get("dx", None)
                         dy = result.get("dy", None)
                         dxy = result.get("dxy", None)
+                        wsum = result.get("wsum", None)
 
                         # Update display using unified method
                         render_data = {
                             "rendered": rendered,
                             "dx": dx,
                             "dy": dy,
-                            "dxy": dxy
+                            "dxy": dxy,
+                            "wsum": wsum
                         }
                         self._update_display_from_tensors(render_data)
 
@@ -622,14 +656,20 @@ class LIGVisualizer:
                     image_tensor = self._prepare_render_data(display_tensor)
                     self._update_texture(image_tensor)
                     self.use_magnitude_shader = False
+                
+        elif self.vis_mode == 5:
+            # Wsum mode
+            if wsum is not None:
+                self._update_wsum_texture(wsum)
+                self.use_viridis_shader = True
             else:
-                # Fallback to regular rendering
+                # Fallback to regular rendering if wsum not available
                 display_tensor = rendered
                 image_tensor = self._prepare_render_data(display_tensor)
                 self._update_texture(image_tensor)
         else:
-            display_tensor = rendered
             # Fallback to regular rendering
+            display_tensor = rendered
             image_tensor = self._prepare_render_data(display_tensor)
             self._update_texture(image_tensor)
 
@@ -706,6 +746,19 @@ class LIGVisualizer:
             
             # Сбрасываем флаг после использования
             self.use_gradient_shader = False
+        elif self.use_viridis_shader:
+            gl.glUseProgram(self.viridis_program)
+            gl.glUniform2f(gl.glGetUniformLocation(self.viridis_program, "pan"), float(self.pan_x), float(self.pan_y))
+            gl.glUniform1f(gl.glGetUniformLocation(self.viridis_program, "zoom"), self.zoom)
+            gl.glUniform2f(gl.glGetUniformLocation(self.viridis_program, "window_size"), float(self.width), float(self.height))
+            gl.glUniform2f(gl.glGetUniformLocation(self.viridis_program, "texture_size"), float(self.image_width), float(self.image_height))
+            
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_wsum)
+            gl.glUniform1i(gl.glGetUniformLocation(self.viridis_program, "texSampler"), 0)
+            
+            # Сбрасываем флаг после использования
+            self.use_viridis_shader = False
         else:
             gl.glUseProgram(self.program)
             gl.glUniform2f(gl.glGetUniformLocation(self.program, "pan"), float(self.pan_x), float(self.pan_y))
@@ -776,6 +829,9 @@ class LIGVisualizer:
         if imgui.radio_button(gradient_label, self.vis_mode == 4):
             self.vis_mode = 4
         
+        if imgui.radio_button("Wsum [6]", self.vis_mode == 5):
+            self.vis_mode = 5
+        
         imgui.separator()
         
         # Zoom slider - общий для всех режимов
@@ -826,8 +882,9 @@ class LIGVisualizer:
         imgui.text("Scroll - Zoom")
         imgui.text("R - Reset view")
         imgui.text("0 - Set zoom to 1.0")
-        imgui.text("1-4 - Switch view mode")
+        imgui.text("1-6 - Switch view mode")
         imgui.text("5 - Cycle gradients")
+        imgui.text("6 - Wsum view")
         imgui.text("ESC - Exit")
         imgui.end()
         
@@ -847,7 +904,8 @@ class LIGVisualizer:
             # Рендерим в зависимости от режима
             if ((self.vis_mode in [0, 1, 4] and self.current_image is not None) or
                 (self.vis_mode == 2 and self.target_image is not None) or
-                (self.vis_mode == 3 and self.gt_image is not None)):
+                (self.vis_mode == 3 and self.gt_image is not None) or
+                (self.vis_mode == 5)):
                 self._setup_shader()
                 gl.glBindVertexArray(self.vao)
                 gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
