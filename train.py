@@ -179,6 +179,10 @@ class SimpleTrainer2d:
                 if self.gui:
                     # Передаём полную модель и оригинальную картинку
                     self.gui.set_model(self.gaussian_model, self.gt_image)
+                    self.gui.set_current_scale(scale_idx)
+                    # Передаём accumulated от предыдущих уровней
+                    if scale_idx > 0:
+                        self.gui.set_accumulated_image(im_estim_prev)
                     # При первом масштабе сохраняем мелкую картинку как референс
                     if scale_idx == 0:
                         self.gui.set_target_image(img_target)
