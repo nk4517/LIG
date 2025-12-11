@@ -51,8 +51,8 @@ class SimpleTrainer2d:
 
         if model_name == "LIG":
             from gaussianlig import LIG
-            self.gaussian_model = LIG(loss_type="L2", opt_type="adam",
-                                      num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
+            self.gaussian_model = LIG(loss_type="L2", opt_type="adan",
+                                      gt_image=self.gt_image, num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
                                       H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                       device=self.device, lr=args.lr).to(self.device)
 
@@ -142,6 +142,12 @@ class SimpleTrainer2d:
                         im_estim_prev_img.save(str(self.log_dir / name))
 
                     img_target = img_target - im_estim_prev
+
+                    # L2 error map для взвешенной инициализации позиций (до нормализации)
+                    l2_error_map = (img_target ** 2).mean(dim=1, keepdim=True)  # [1, 1, H, W]
+                    self.gaussian_model.level_models[scale_idx].to(self.device)
+                    self.gaussian_model.level_models[scale_idx].reinit_positions(l2_error_map)
+
                     im_estim_prev = im_estim_prev.cpu()
                     img_target += 0.5
 
