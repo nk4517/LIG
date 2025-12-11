@@ -2,6 +2,7 @@ import sys
 sys.path.insert(0, '../splatting_app/gsplat-2025/examples')
 from lib_dog import fast_dog
 from gsplat2d.project_gaussians import project_gaussians
+from gsplat2d.project_gaussians_cholesky import project_gaussians_cholesky
 from gsplat2d.rasterize import rasterize_gaussians
 from utils import *
 import torch
@@ -53,6 +54,7 @@ class LIG(nn.Module):
 class Gaussian2D(nn.Module):
     def __init__(self, loss_type="L2", init_weights=None, **kwargs):
         super().__init__()
+        self.use_cuda_cholesky = kwargs.get("use_cuda_cholesky", True)
         self.loss_type = loss_type
         self.init_num_points = kwargs["num_points"]
         self.H, self.W = kwargs["H"], kwargs["W"]
@@ -64,27 +66,28 @@ class Gaussian2D(nn.Module):
         self.last_size = (self.H, self.W)
 
         self.means = nn.Parameter(self._sample_positions(init_weights))
+        self.register_buffer('cholesky_bound', torch.tensor([0.5, 0, 0.5], device=self.device).view(1, 3))
 
-        self.cov2d = nn.Parameter(torch.rand(self.init_num_points, 3, device=self.device))
+        self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3, device=self.device))
         d = 3
         self.rgbs = nn.Parameter(torch.zeros(self.init_num_points, d, device=self.device))
 
         self.means.requires_grad = True
-        self.cov2d.requires_grad = True
+        self._cholesky.requires_grad = True
         self.rgbs.requires_grad = True
 
         if kwargs["opt_type"] == "adam":
             self.optimizer = torch.optim.Adam([
                 {'params': self.rgbs, 'lr': kwargs["lr"]},
                 {'params': self.means, 'lr': kwargs["lr"] * 2},
-                {'params': self.cov2d, 'lr': kwargs["lr"] * 5}
+                {'params': self._cholesky, 'lr': kwargs["lr"] * 5}
             ])
         else:
             s = 8
             self.optimizer = Adan([
                 {'params': self.rgbs, 'lr': kwargs["lr"]},
                 {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
-                {'params': self.cov2d, 'lr': kwargs["lr"] * 5 * s}
+                {'params': self._cholesky, 'lr': kwargs["lr"] * 5 * s}
             ],
                 betas=(0.98, 0.92, 0.99),
                 fused=True)
@@ -137,19 +140,44 @@ class Gaussian2D(nn.Module):
         with torch.no_grad():
             self.means.data = self._sample_positions(weights)
 
+    @property
+    def get_cholesky_elements(self):
+        return self._cholesky + self.cholesky_bound
+
+    def _cholesky_to_cov2d(self, cholesky):
+        l11 = cholesky[:, 0]
+        l21 = cholesky[:, 1]
+        l22 = cholesky[:, 2]
+        return torch.stack([l11 * l11, l11 * l21, l21 * l21 + l22 * l22], dim=1)
+
     def forward(self):
-        (
-            xys,
-            radii,
-            conics,
-            num_tiles_hit,
-        ) = project_gaussians(
-            self.cov2d,
-            self.means,
-            self.H,
-            self.W,
-            self.B_SIZE,
-        )
+        if self.use_cuda_cholesky:
+            (
+                xys,
+                radii,
+                conics,
+                num_tiles_hit,
+            ) = project_gaussians_cholesky(
+                self.get_cholesky_elements,
+                self.means,
+                self.H,
+                self.W,
+                self.B_SIZE,
+            )
+        else:
+            cov2d = self._cholesky_to_cov2d(self.get_cholesky_elements)
+            (
+                xys,
+                radii,
+                conics,
+                num_tiles_hit,
+            ) = project_gaussians(
+                cov2d,
+                self.means,
+                self.H,
+                self.W,
+                self.B_SIZE,
+            )
         out_img, out_wsum, dx, dy, dxy = rasterize_gaussians(
                 xys,
                 radii,

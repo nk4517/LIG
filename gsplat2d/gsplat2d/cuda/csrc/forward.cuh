@@ -60,3 +60,16 @@ __global__ void rasterize_forward(
     float3* __restrict__ out_img,
     float* __restrict__ out_wsum
 );
+
+// project gaussians directly from cholesky decomposition
+__global__ void project_gaussians_forward_kernel_cholesky(
+    const int num_points,
+    const float3* __restrict__ cholesky,  // [l11, l21, l22]
+    const float2* __restrict__ means2d,
+    const dim3 tile_bounds,
+    const unsigned block_width,
+    float2* __restrict__ xys,
+    int* __restrict__ radii,
+    float3* __restrict__ conics,
+    int32_t* __restrict__ num_tiles_hit
+);

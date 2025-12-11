@@ -204,3 +204,43 @@ __global__ void project_gaussians_backward_kernel(
     // get v_cov2d
     cov2d_to_conic_vjp(conics[idx], v_conic[idx], v_cov2d[idx]);
 }
+
+__global__ void project_gaussians_backward_kernel_cholesky(
+    const int num_points,
+    const int* __restrict__ radii,
+    const float3* __restrict__ cholesky,
+    const float3* __restrict__ conics,
+    const float2* __restrict__ v_xy,
+    const float3* __restrict__ v_conic,
+    float3* __restrict__ v_cholesky,
+    float2* __restrict__ v_mean2d
+) {
+    unsigned idx = cg::this_grid().thread_rank();
+    if (idx >= num_points || radii[idx] <= 0) {
+        return;
+    }
+
+    v_mean2d[idx].x = v_xy[idx].x;
+    v_mean2d[idx].y = v_xy[idx].y;
+
+    // get v_cov2d first
+    float3 v_cov2d;
+    cov2d_to_conic_vjp(conics[idx], v_conic[idx], v_cov2d);
+
+    // chain rule: v_cholesky from v_cov2d
+    // cov2d = [l11^2, l11*l21, l21^2 + l22^2]
+    // v_l11 = 2*l11*v_a + l21*v_b
+    // v_l21 = l11*v_b + 2*l21*v_c
+    // v_l22 = 2*l22*v_c
+    float3 chol = cholesky[idx];
+    float l11 = chol.x;
+    float l21 = chol.y;
+    float l22 = chol.z;
+    float v_a = v_cov2d.x;
+    float v_b = v_cov2d.y;
+    float v_c = v_cov2d.z;
+
+    v_cholesky[idx] = {2.f * l11 * v_a + l21 * v_b,
+                       l11 * v_b + 2.f * l21 * v_c,
+                       2.f * l22 * v_c};
+}
