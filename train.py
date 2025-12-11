@@ -134,11 +134,10 @@ class SimpleTrainer2d:
                     self.gaussian_model.store_min.append(store_min)
                     self.gaussian_model.store_max.append(store_max)
 
+                torch.cuda.empty_cache()
                 progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
                 self.gaussian_model.level_models[scale_idx].train()
                 for iter in range(1, self.iterations+1):
-                    # affect memory and speed
-                    torch.cuda.empty_cache()
                     loss, psnr = self.gaussian_model.level_models[scale_idx].train_iter(img_target)
                     psnr_list.append(psnr)
                     iter_list.append(iter)
