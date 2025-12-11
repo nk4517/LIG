@@ -283,7 +283,7 @@ def parse_args(argv):
         "--data_name", type=str, default='DIV2K_valid_HR', help="Training dataset"
     )
     parser.add_argument(
-        "--iterations", type=int, default=15000, help="number of training epochs (default: %(default)s)"
+        "--iterations", type=int, default=3_000, help="number of training epochs (default: %(default)s)"
     )
     parser.add_argument(
         "--model_name", type=str, default="LIG", help="model selection: GaussianImage_Cholesky, GaussianImage_RS, 3DGS"
@@ -291,14 +291,14 @@ def parse_args(argv):
     parser.add_argument(
         "--num_points",
         type=int,
-        default=500000,
+        default=500_000,
         help="2D GS points (default: %(default)s)",
     )
 
     # x:\_ai\_gsplat\datasets\DIV2K_valid_HR\0834.png
     # x:\_ai\_gsplat\datasets\328220.jpg
 
-    parser.add_argument("--n_scales", type=int, default=4)
+    parser.add_argument("--n_scales", type=int, default=2)
     parser.add_argument("--allo_ratio", type=float, default=0.5)
     parser.add_argument("--model_path", type=str, default=None, help="Path to a checkpoint")
     parser.add_argument("--seed", type=float, default=1, help="Set random seed for reproducibility")

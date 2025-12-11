@@ -42,7 +42,7 @@ class LIG(nn.Module):
                 img_small = torch.nn.functional.interpolate(
                     gt_image, size=(H, W), mode='area'
                 )
-                dog_weights = fast_dog(img_small, sigma=2.0, k=1.6)
+                dog_weights = fast_dog(img_small, sigma=1.2, k=1.6)
 
             self.level_models.append(Gaussian2D(loss_type=self.loss_type, opt_type=kwargs['opt_type'],
                                                    num_points=num_points,
@@ -80,11 +80,14 @@ class Gaussian2D(nn.Module):
                 {'params': self.cov2d, 'lr': kwargs["lr"] * 5}
             ])
         else:
+            s = 8
             self.optimizer = Adan([
                 {'params': self.rgbs, 'lr': kwargs["lr"]},
-                {'params': self.means, 'lr': kwargs["lr"] * 2},
-                {'params': self.cov2d, 'lr': kwargs["lr"] * 5}
-            ], fused=True)
+                {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
+                {'params': self.cov2d, 'lr': kwargs["lr"] * 5 * s}
+            ],
+                betas=(0.98, 0.92, 0.99),
+                fused=True)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=70000, gamma=0.7)
 
     _MULTINOMIAL_LIMIT = 2**24 - 1 # 4096x4096
