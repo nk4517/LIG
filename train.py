@@ -218,7 +218,17 @@ class SimpleTrainer2d:
                         im_estim = self.gaussian_model.level_models[scale_idx]()["render"].float()*(store_max-store_min) + im_estim_prev.to(self.device) - 0.5 + store_min 
 
                     im_estim = im_estim.detach()
+                    
+                    # Sync with GUI before offloading to CPU
+                    if self.gui:
+                        if self.gui.e_want_to_render.is_set():
+                            self.gui.e_finished_rendering.wait()
+                        self.gui.lock.acquire(blocking=True)
+                    
                     self.gaussian_model.level_models[scale_idx] = self.gaussian_model.level_models[scale_idx].to("cpu")
+                    
+                    if self.gui:
+                        self.gui.lock.release()
 
             end_time = time.time() - start_time
             progress_bar.close()
