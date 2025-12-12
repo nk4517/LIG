@@ -16,6 +16,10 @@ import random
 import torchvision.transforms as transforms
 import threading
 
+sys.path.insert(0, '../splatting_app/gsplat-2025/examples')
+from lib_dog import fast_dog
+
+
 if typing.TYPE_CHECKING:
     from visualizer import LIGVisualizer
 
@@ -130,10 +134,12 @@ class SimpleTrainer2d:
                 else:
                     img_target = self.gt_image
                 
+                img_target_display = img_target  # downscaled для GUI (до преобразований в residual)
+                
                 if scale_idx != 0:
                     im_estim_prev = torch.nn.functional.interpolate(im_estim,
                                                                     size = (img_target.shape[2], img_target.shape[3]),
-                                                                    mode='bilinear')
+                                                                    mode='area')
                     del im_estim
                     if self.save_imgs:
                         transform = transforms.ToPILImage()
@@ -172,6 +178,9 @@ class SimpleTrainer2d:
                     self.gaussian_model.store_max.append(store_max)
 
                 torch.cuda.empty_cache()
+                
+                dog_weights = fast_dog(img_target, sigma=2.5, k=1.6)
+                self.gaussian_model.level_models[scale_idx].set_dog_weights(dog_weights)
                 progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
                 self.gaussian_model.level_models[scale_idx].train()
                 
@@ -183,9 +192,8 @@ class SimpleTrainer2d:
                     # Передаём accumulated от предыдущих уровней
                     if scale_idx > 0:
                         self.gui.set_accumulated_image(im_estim_prev)
-                    # При первом масштабе сохраняем мелкую картинку как референс
-                    if scale_idx == 0:
-                        self.gui.set_target_image(img_target)
+                    # Обновляем target для текущего уровня
+                    self.gui.set_target_image(img_target_display)
                 
                 for iter in range(1, self.iterations+1):
                     # GUI synchronization
@@ -412,13 +420,16 @@ def main(argv):
 
         logwriter.write("Average: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
             avg_h, avg_w, avg_psnr, avg_ms_ssim, avg_training_time, avg_eval_time, avg_eval_fps))
-    
-    # Clean up GUI
-    if gui:
+
+    # Post-training visualization loop
+    if gui and gui_thread:
+        gui.set_updated()
+        while gui_thread.is_alive():
+            gui.e_want_to_render.wait(timeout=0.1)
+
         gui.e_want_to_render.clear()
         gui.e_finished_rendering.set()
-        if gui_thread:
-            gui_thread.join(timeout=2)
+        gui_thread.join(timeout=2)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

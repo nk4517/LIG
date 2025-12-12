@@ -5,7 +5,7 @@ from utils import *
 import torch
 import torch.nn as nn
 
-from LIG.utils import loss_fn
+from LIG.utils import loss_fn, _elongation_penalty
 from gsplat2d import project_gaussians_cholesky, rasterize_gaussians
 
 
@@ -27,7 +27,7 @@ class ProgressiveGaussian2D(nn.Module):
         # Initialize parameters
         self.means = nn.Parameter(self._sample_positions(num_points, H, W, init_weights))
         self._cholesky = nn.Parameter(torch.rand(num_points, 3, device=device))
-        self.rgbs = nn.Parameter(torch.zeros(num_points, 3, device=device))
+        self._rgb_logits = nn.Parameter(torch.zeros(num_points, 3, device=device))
 
         self._init_optimizer()
 
@@ -86,14 +86,14 @@ class ProgressiveGaussian2D(nn.Module):
     def _init_optimizer(self):
         if self.opt_type == "adam":
             self.optimizer = torch.optim.Adam([
-                {'params': self.rgbs, 'lr': self.lr},
+                {'params': self._rgb_logits, 'lr': self.lr},
                 {'params': self.means, 'lr': self.lr * 2},
                 {'params': self._cholesky, 'lr': self.lr * 5}
             ])
         else:
             s = 8
             self.optimizer = Adan([
-                {'params': self.rgbs, 'lr': self.lr},
+                {'params': self._rgb_logits, 'lr': self.lr * s},
                 {'params': self.means, 'lr': self.lr * 2 * s},
                 {'params': self._cholesky, 'lr': self.lr * 5 * s}
             ], betas=(0.98, 0.92, 0.99), fused=True)
@@ -104,12 +104,12 @@ class ProgressiveGaussian2D(nn.Module):
         with torch.no_grad():
             new_means = self._sample_positions(num_new, self.H, self.W, weights)
             new_cholesky = torch.rand(num_new, 3, device=self.device)
-            new_rgbs = torch.zeros(num_new, 3, device=self.device)
+            new_rgb_logits = torch.zeros(num_new, 3, device=self.device)
 
             # Concatenate with existing
             self.means = nn.Parameter(torch.cat([self.means.data, new_means], dim=0))
             self._cholesky = nn.Parameter(torch.cat([self._cholesky.data, new_cholesky], dim=0))
-            self.rgbs = nn.Parameter(torch.cat([self.rgbs.data, new_rgbs], dim=0))
+            self._rgb_logits = nn.Parameter(torch.cat([self._rgb_logits.data, new_rgb_logits], dim=0))
 
         # Reinitialize optimizer with new parameters
         self._init_optimizer()
@@ -127,6 +127,10 @@ class ProgressiveGaussian2D(nn.Module):
     @property
     def get_cholesky_elements(self):
         return self._cholesky + self.cholesky_bound
+    
+    @property
+    def get_rgbs(self):
+        return torch.sigmoid(self._rgb_logits)
 
     @property
     def num_points(self):
@@ -141,13 +145,12 @@ class ProgressiveGaussian2D(nn.Module):
         )
         out_img, out_wsum, dx, dy, dxy = rasterize_gaussians(
             xys, radii, conics, num_tiles_hit,
-            self.rgbs,
+            self.get_rgbs,
             self.H, self.W,
             self.B_SIZE,
         )
 
-        out_img = torch.clamp(out_img[..., :3], 0, 1)
-        out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
+        out_img = out_img[..., :3].view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
 
         dx = dx[..., :3].view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
         dy = dy[..., :3].view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
@@ -158,7 +161,13 @@ class ProgressiveGaussian2D(nn.Module):
     def train_iter(self, gt_image):
         render_pkg = self.forward()
         image = render_pkg["render"]
+        # wsum = render_pkg["wsum"]
         loss = loss_fn(image, gt_image, "L2", lambda_value=0.7)
+        # Штраф за пиксели вне [0, 1] (weighted sum может выходить за диапазон)
+        # clamp_penalty = (F.relu(-image) + F.relu(image - 1)).mean()
+        # loss = loss + 0.1 * clamp_penalty
+        elongation_penalty = _elongation_penalty(self.get_cholesky_elements)
+        loss = loss + 0.01 * elongation_penalty
         loss.backward()
         with torch.no_grad():
             mse_loss = F.mse_loss(image, gt_image)

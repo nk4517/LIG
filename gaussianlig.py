@@ -1,4 +1,7 @@
 import sys
+
+from LIG.utils import _elongation_penalty
+
 sys.path.insert(0, '../splatting_app/gsplat-2025/examples')
 from lib_dog import fast_dog
 from gsplat2d.project_gaussians import project_gaussians
@@ -64,6 +67,7 @@ class Gaussian2D(nn.Module):
         self.device = kwargs["device"]
 
         self.last_size = (self.H, self.W)
+        self.dog_weights: torch.Tensor | None = None
 
         self.means = nn.Parameter(self._sample_positions(init_weights))
         self.register_buffer('cholesky_bound', torch.tensor([0.5, 0, 0.5], device=self.device).view(1, 3))
@@ -83,7 +87,7 @@ class Gaussian2D(nn.Module):
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5}
             ])
         else:
-            s = 8
+            s = 1
             self.optimizer = Adan([
                 {'params': self._rgb_logits, 'lr': kwargs["lr"] / 2},
                 {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
@@ -139,6 +143,14 @@ class Gaussian2D(nn.Module):
     def reinit_positions(self, weights: torch.Tensor):
         with torch.no_grad():
             self.means.data = self._sample_positions(weights)
+
+    def set_dog_weights(self, dog: torch.Tensor):
+        """Установка DoG весов для взвешивания лосса. dog: [1, 1, H, W] или [H, W]"""
+        dog = dog.squeeze()
+        dog = dog - dog.min()
+        if dog.max() > 0:
+            dog = dog / dog.max()
+        self.dog_weights = dog.to(self.device)
 
     @property
     def get_cholesky_elements(self):
@@ -211,7 +223,16 @@ class Gaussian2D(nn.Module):
     def train_iter(self, gt_image):
         render_pkg = self.forward()
         image = render_pkg["render"]
-        loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        if self.dog_weights is not None:
+            weight_map = self.dog_weights.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W] 
+            per_pixel_loss = ((image - gt_image) ** 2).mean(dim=1, keepdim=True)  # [1, 1, H, W]
+            weighted_loss = (per_pixel_loss * weight_map).sum() / weight_map.sum()
+            loss = weighted_loss
+        else:
+            loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        
+        elongation_penalty = _elongation_penalty(self.get_cholesky_elements)
+        loss = loss + 0.01 * elongation_penalty
         loss.backward()
         with torch.no_grad():
             mse_loss = F.mse_loss(image, gt_image)

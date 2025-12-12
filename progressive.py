@@ -39,6 +39,7 @@ class ProgressiveTrainer:
         lr: float = 0.018,
         save_imgs: bool = True,
         gui: "LIGVisualizer|None" = None,
+        add_points_mode: str = "error",  # "error" or "dog"
     ):
         self.device = torch.device("cuda:0")
         self.gt_image = image_path_to_tensor(image_path).to(self.device)
@@ -51,6 +52,7 @@ class ProgressiveTrainer:
         self.gui = gui
         self.stages = stages
         self.lr = lr
+        self.add_points_mode = add_points_mode
         
         # Calculate initial points for first stage
         total_added = sum(s.points_to_add for s in stages)
@@ -142,7 +144,14 @@ class ProgressiveTrainer:
             if stage.points_to_add > 0:
                 with torch.no_grad():
                     rendered = self.model()["render"]
-                    weights = self._compute_error_weights(rendered, target)
+                    weights_dog = fast_dog(target, sigma=1.5, k=1.6)
+                    weights_error = self._compute_error_weights(rendered, target)
+                    if self.add_points_mode == "dog":
+                        weights = weights_dog
+                    elif self.add_points_mode == "error":
+                        weights = weights_error
+                    else:
+                        weights = weights_dog + weights_error * 100
                 
                 self.model.add_points(stage.points_to_add, weights)
                 self.logwriter.write(
@@ -224,10 +233,10 @@ def parse_args(argv):
     # Stage configuration
     parser.add_argument("--scales", type=str, default="12,4,1",
                         help="Comma-separated scale divisors (e.g., '12,4,1' means 1/12, 1/4, 1/1)")
-    parser.add_argument("--iters_per_stage", type=str, default="1000,2000,3000",
-                        help="Comma-separated iterations per stage")
-    parser.add_argument("--points_ratio", type=str, default="0.1,0.3",
-                        help="Comma-separated ratios of total points to add after each stage (except last)")
+    parser.add_argument("--total_iters", type=int, default=6000,
+                        help="Total iterations (distributed proportionally to stage areas)")
+    parser.add_argument("--add_points_mode", type=str, default="error",
+                        choices=["dog", "error", "dog+error"], help="Point placement weights: error map or DoG")
     
     return parser.parse_args(argv)
 
@@ -245,15 +254,24 @@ def main(argv):
     
     # Parse stage configuration
     scales = [float(x) for x in args.scales.split(',')]
-    iters = [int(x) for x in args.iters_per_stage.split(',')]
-    ratios = [float(x) for x in args.points_ratio.split(',')]
+    
+    # Distribute iterations and points proportionally to stage areas (1/scale^2)
+    areas = [1.0 / (s * s) for s in scales]
+    total_area = sum(areas)
+    area_proportions = [a / total_area for a in areas]
+    
+    # Iterations proportional to scale (more iters at lower res)
+    inv_scales = [1.0 / s for s in scales]
+    total_inv = sum(inv_scales)
+    iters = [max(1, int(args.total_iters * inv / total_inv)) for inv in inv_scales]
+    points_per_stage = [max(1, int(args.num_points * p)) for p in area_proportions]
     
     stages = []
     for i, (scale, it) in enumerate(zip(scales, iters)):
-        pts = int(args.num_points * ratios[i]) if i < len(ratios) else 0
+        pts = points_per_stage[i + 1] if i < len(scales) - 1 else 0
         stages.append(StageConfig(scale=scale, iterations=it, points_to_add=pts))
     
-    log_path = f"./checkpoints/{args.data_name}/Progressive_{sum(iters)}_{args.num_points}"
+    log_path = f"./checkpoints/{args.data_name}/Progressive_{args.total_iters}_{args.num_points}"
     logwriter = LogWriter(log_path)
     
     gui = None
@@ -277,6 +295,7 @@ def main(argv):
         stages=stages,
         lr=args.lr,
         save_imgs=args.save_imgs,
+        add_points_mode=args.add_points_mode,
         gui=gui,
     )
     
@@ -286,13 +305,16 @@ def main(argv):
         f"PSNR:{psnr:.4f}, MS-SSIM:{ms_ssim_val:.4f}, "
         f"Training:{train_time:.4f}s, Eval:{eval_time:.8f}s, FPS:{fps:.4f}"
     )
-    
-    if gui:
+
+    # Post-training visualization loop
+    if gui and gui_thread:
+        gui.set_updated()
+        while gui_thread.is_alive():
+            gui.e_want_to_render.wait(timeout=0.1)
+
         gui.e_want_to_render.clear()
         gui.e_finished_rendering.set()
-        if gui_thread:
-            gui_thread.join(timeout=2)
-
+        gui_thread.join(timeout=2)
 
 if __name__ == "__main__":
     main(sys.argv[1:])
