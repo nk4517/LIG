@@ -55,22 +55,22 @@ class Gaussian2D(nn.Module):
 
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3, device=self.device))
         d = 3
-        self.rgbs = nn.Parameter(torch.zeros(self.init_num_points, d, device=self.device))
+        self._rgb_logits = nn.Parameter(torch.zeros(self.init_num_points, d, device=self.device))
 
         self.means.requires_grad = True
         self._cholesky.requires_grad = True
-        self.rgbs.requires_grad = True
+        self._rgb_logits.requires_grad = True
 
         if kwargs["opt_type"] == "adam":
             self.optimizer = torch.optim.Adam([
-                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self._rgb_logits, 'lr': kwargs["lr"]},
                 {'params': self.means, 'lr': kwargs["lr"] * 2},
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5},
             ])
         else:
             s = 1
             self.optimizer = Adan([
-                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self._rgb_logits, 'lr': kwargs["lr"] * 5 * s},
                 {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5 * s},
             ],
@@ -84,6 +84,10 @@ class Gaussian2D(nn.Module):
         L21 = self._cholesky[:, 1]  # no softplus
         L22 = F.softplus(self._cholesky[:, 2])
         return torch.stack([L11, L21, L22], dim=1)
+
+    @property
+    def rgbs(self):
+        return torch.sigmoid(self._rgb_logits)
 
     def forward(self):
         (
