@@ -20,6 +20,7 @@ class ProgressiveGaussian2D(nn.Module):
         self.W = W
         self.B_SIZE = 16
         self.lr = lr
+        self.dog_weights: torch.Tensor | None = None
         self.opt_type = opt_type
 
         self.register_buffer('cholesky_bound', torch.tensor([0.5, 0, 0.5], device=device).view(1, 3))
@@ -83,6 +84,14 @@ class ProgressiveGaussian2D(nn.Module):
 
         return torch.cat((w_init, h_init), dim=1).to(self.device)
 
+    def set_dog_weights(self, dog: torch.Tensor):
+        """Установка DoG весов для взвешивания лосса. dog: [1, 1, H, W] или [H, W]"""
+        dog = dog.squeeze()
+        dog = dog - dog.min()
+        if dog.max() > 0:
+            dog = dog / dog.max()
+        self.dog_weights = dog.to(self.device)
+
     def _init_optimizer(self):
         if self.opt_type == "adam":
             self.optimizer = torch.optim.Adam([
@@ -91,13 +100,13 @@ class ProgressiveGaussian2D(nn.Module):
                 {'params': self._cholesky, 'lr': self.lr * 5}
             ])
         else:
-            s = 8
+            s = 3
             self.optimizer = Adan([
                 {'params': self._rgb_logits, 'lr': self.lr * s},
                 {'params': self.means, 'lr': self.lr * 2 * s},
-                {'params': self._cholesky, 'lr': self.lr * 5 * s}
+                {'params': self._cholesky, 'lr': self.lr * 1 * s}
             ], betas=(0.98, 0.92, 0.99), fused=True)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=70000, gamma=0.7)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=7000, gamma=0.7)
 
     def add_points(self, num_new: int, weights: torch.Tensor):
         """Add new points with positions sampled from weights distribution"""
@@ -161,8 +170,13 @@ class ProgressiveGaussian2D(nn.Module):
     def train_iter(self, gt_image):
         render_pkg = self.forward()
         image = render_pkg["render"]
-        # wsum = render_pkg["wsum"]
-        loss = loss_fn(image, gt_image, "L2", lambda_value=0.7)
+        if self.dog_weights is not None:
+            weight_map = self.dog_weights.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            per_pixel_loss = ((image - gt_image) ** 2).mean(dim=1, keepdim=True)  # [1, 1, H, W]
+            weighted_loss = (per_pixel_loss * weight_map).sum() / weight_map.sum()
+            loss = weighted_loss
+        else:
+            loss = loss_fn(image, gt_image, "L2", lambda_value=0.7)
         # Штраф за пиксели вне [0, 1] (weighted sum может выходить за диапазон)
         # clamp_penalty = (F.relu(-image) + F.relu(image - 1)).mean()
         # loss = loss + 0.1 * clamp_penalty

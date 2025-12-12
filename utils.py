@@ -125,7 +125,8 @@ def build_triangular(r):
     return R
 
 
-@torch.compile
+# @torch.compile
+@torch.jit.script
 def _elongation_penalty(chol: torch.Tensor) -> torch.Tensor:
     """chol: [N, 3] — L11, L21, L22"""
     # Σ = [[L11², L11*L21], [L11*L21, L21² + L22²]]

@@ -108,6 +108,10 @@ class ProgressiveTrainer:
             if self.gui:
                 self.gui.set_target_image(target)
             
+            # DoG weights для модуляции loss
+            dog_weights = fast_dog(target, sigma=2.5, k=1.6)
+            self.model.set_dog_weights(dog_weights)
+            
             progress_bar = tqdm(
                 range(1, stage.iterations + 1),
                 desc=f"Stage {stage_idx} (1/{stage.scale:.0f}x, {self.model.num_points} pts)"

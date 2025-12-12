@@ -139,7 +139,7 @@ class SimpleTrainer2d:
                 if scale_idx != 0:
                     im_estim_prev = torch.nn.functional.interpolate(im_estim,
                                                                     size = (img_target.shape[2], img_target.shape[3]),
-                                                                    mode='area')
+                                                                    mode='bicubic', antialias=True)
                     del im_estim
                     if self.save_imgs:
                         transform = transforms.ToPILImage()

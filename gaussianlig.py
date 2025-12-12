@@ -89,13 +89,13 @@ class Gaussian2D(nn.Module):
         else:
             s = 1
             self.optimizer = Adan([
-                {'params': self._rgb_logits, 'lr': kwargs["lr"] / 2},
+                {'params': self._rgb_logits, 'lr': kwargs["lr"] * 5 * s},
                 {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5 * s}
             ],
                 betas=(0.98, 0.92, 0.99),
                 fused=True)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=70000, gamma=0.7)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=10000, gamma=0.7)
 
     _MULTINOMIAL_LIMIT = 2**24 - 1 # 4096x4096
 
