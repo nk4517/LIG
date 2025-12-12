@@ -13,6 +13,7 @@ from utils import *
 from tqdm import tqdm
 import random
 import torchvision.transforms as transforms
+import threading
 
 class SimpleTrainer2d:
     """Trains random 2d gaussians to fit an image."""
@@ -25,6 +26,7 @@ class SimpleTrainer2d:
         iterations:int = 30000,
         model_path = None,
         args = None,
+        gui = None,
     ):
         self.device = torch.device("cuda:0")
         self.gt_image = image_path_to_tensor(image_path).to(self.device)
@@ -38,6 +40,9 @@ class SimpleTrainer2d:
         self.iterations = iterations
         self.save_imgs = args.save_imgs
         self.log_dir = Path(log_path + '/' + self.image_name)
+        
+        # Store GUI reference
+        self.gui = gui
 
         if model_name == "LIG":
             from gaussianlig import LIG
@@ -45,6 +50,10 @@ class SimpleTrainer2d:
                                       num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
                                       H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                       device=self.device, lr=args.lr).to(self.device)
+
+        # Set model in GUI if available
+        if self.gui:
+            self.gui.setModel(self.gaussian_model, self.gt_image)
 
         self.logwriter = LogWriter(self.log_dir)
 
@@ -73,13 +82,30 @@ class SimpleTrainer2d:
             self.gaussian_model.train()
             start_time = time.time()
             for iter in range(1, self.iterations+1):
+                
+                # GUI synchronization
+                if self.gui:
+                    # Check if GUI wants to render
+                    if self.gui.e_want_to_render.is_set():
+                        self.gui.e_finished_rendering.wait()
+                    # Acquire lock for training step
+                    self.gui.lock.acquire(blocking=True)
+                
                 loss, psnr = self.gaussian_model.train_iter(self.gt_image)
                 psnr_list.append(psnr)
                 iter_list.append(iter)
+                
                 with torch.no_grad():
                     if iter % 10 == 0:
                         progress_bar.set_postfix({f"Loss":f"{loss.item():.{7}f}", "PSNR":f"{psnr:.{4}f},"})
                         progress_bar.update(10)
+                
+                # Update GUI and release lock
+                if self.gui:
+                    self.gui.set_updated()
+                    self.gui.update_stats(iter, psnr, loss.item())
+                    self.gui.lock.release()
+                    
             end_time = time.time() - start_time
             progress_bar.close()
             psnr_value, ms_ssim_value = self.test()
@@ -136,16 +162,36 @@ class SimpleTrainer2d:
 
                 progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
                 self.gaussian_model.level_models[scale_idx].train()
+                
+                # Set current model in GUI for multi-scale
+                if self.gui:
+                    self.gui.setModel(self.gaussian_model.level_models[scale_idx], img_target)
+                
                 for iter in range(1, self.iterations+1):
+                    # GUI synchronization
+                    if self.gui:
+                        # Check if GUI wants to render
+                        if self.gui.e_want_to_render.is_set():
+                            self.gui.e_finished_rendering.wait()
+                        # Acquire lock for training step
+                        self.gui.lock.acquire(blocking=True)
+                    
                     # affect memory and speed
                     torch.cuda.empty_cache()
                     loss, psnr = self.gaussian_model.level_models[scale_idx].train_iter(img_target)
                     psnr_list.append(psnr)
                     iter_list.append(iter)
+                    
                     with torch.no_grad():
                         if iter % 10 == 0:
                             progress_bar.set_postfix({f"Loss":f"{loss.item():.{7}f}", "PSNR":f"{psnr:.{4}f},"})
                             progress_bar.update(10)
+                    
+                    # Update GUI and release lock
+                    if self.gui:
+                        self.gui.set_updated()
+                        self.gui.update_stats(scale_idx * self.iterations + iter, psnr, loss.item())
+                        self.gui.lock.release()
                 
                 with torch.no_grad():
                     if scale_idx == 0:
@@ -236,6 +282,7 @@ def parse_args(argv):
     parser.add_argument("--allo_ratio", type=float, default=0.5)
     parser.add_argument("--model_path", type=str, default=None, help="Path to a checkpoint")
     parser.add_argument("--seed", type=float, default=1, help="Set random seed for reproducibility")
+    parser.add_argument("--visualize", action="store_true", help="Enable real-time visualization", default=True)
     parser.add_argument("--save_imgs", action="store_true", help="Save image")
     parser.add_argument(
         "--lr",
@@ -274,6 +321,21 @@ def main(argv):
         image_length, start = 15, 0
     elif args.data_name == "GF1":
         image_length, start = 4, 0
+    
+    # Initialize GUI if requested
+    gui = None
+    gui_thread = None
+    if args.visualize:
+        try:
+            from visualizer import LIGVisualizer
+            gui = LIGVisualizer(width=800, height=600)
+            gui_thread = threading.Thread(target=gui.run)
+            gui_thread.start()
+            time.sleep(1)  # Give GUI time to initialize
+        except ImportError:
+            print("Visualizer not available, continuing without visualization")
+            gui = None
+    
     for i in range(start, start+image_length):
         if args.data_name == "kodak":
             image_path = Path(args.dataset) / f'kodim{i+1:02}.png'
@@ -288,7 +350,7 @@ def main(argv):
 
         torch.cuda.empty_cache()
         trainer = SimpleTrainer2d(image_path=image_path, log_path=log_path, num_points=args.num_points, 
-            iterations=args.iterations, model_name=args.model_name, args=args, model_path=args.model_path)
+            iterations=args.iterations, model_name=args.model_name, args=args, model_path=args.model_path, gui=gui)
         psnr, ms_ssim, training_time, eval_time, eval_fps = trainer.train()
         psnrs.append(psnr)
         ms_ssims.append(ms_ssim)
@@ -310,7 +372,14 @@ def main(argv):
     avg_w = image_w//image_length
 
     logwriter.write("Average: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
-        avg_h, avg_w, avg_psnr, avg_ms_ssim, avg_training_time, avg_eval_time, avg_eval_fps))    
+        avg_h, avg_w, avg_psnr, avg_ms_ssim, avg_training_time, avg_eval_time, avg_eval_fps))
+    
+    # Clean up GUI
+    if gui:
+        gui.e_want_to_render.clear()
+        gui.e_finished_rendering.set()
+        if gui_thread:
+            gui_thread.join(timeout=2)
 
 if __name__ == "__main__":
     main(sys.argv[1:])
