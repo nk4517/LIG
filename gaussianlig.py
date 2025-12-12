@@ -70,22 +70,22 @@ class Gaussian2D(nn.Module):
 
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3, device=self.device))
         d = 3
-        self.rgbs = nn.Parameter(torch.zeros(self.init_num_points, d, device=self.device))
+        self._rgb_logits = nn.Parameter(torch.zeros(self.init_num_points, d, device=self.device))
 
         self.means.requires_grad = True
         self._cholesky.requires_grad = True
-        self.rgbs.requires_grad = True
+        self._rgb_logits.requires_grad = True
 
         if kwargs["opt_type"] == "adam":
             self.optimizer = torch.optim.Adam([
-                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self._rgb_logits, 'lr': kwargs["lr"]},
                 {'params': self.means, 'lr': kwargs["lr"] * 2},
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5}
             ])
         else:
             s = 8
             self.optimizer = Adan([
-                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self._rgb_logits, 'lr': kwargs["lr"] / 2},
                 {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
                 {'params': self._cholesky, 'lr': kwargs["lr"] * 5 * s}
             ],
@@ -144,6 +144,10 @@ class Gaussian2D(nn.Module):
     def get_cholesky_elements(self):
         return self._cholesky + self.cholesky_bound
 
+    @property
+    def get_rgbs(self):
+        return torch.sigmoid(self._rgb_logits)
+
     def _cholesky_to_cov2d(self, cholesky):
         l11 = cholesky[:, 0]
         l21 = cholesky[:, 1]
@@ -183,13 +187,13 @@ class Gaussian2D(nn.Module):
                 radii,
                 conics,
                 num_tiles_hit,
-                self.rgbs,
+                self.get_rgbs,
                 self.H,
                 self.W,
                 self.B_SIZE,
             )
 
-        out_img = torch.clamp(out_img[..., :3], 0, 1)
+        out_img = out_img[..., :3]
         out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
 
         # Gradients can be negative, don't clamp them
