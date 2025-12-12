@@ -369,12 +369,33 @@ class LIGVisualizer:
         # При ручном изменении зума отключаем fit_to_window
         self.fit_to_window = False
 
+        if self.displayed_image_width <= 0 or self.displayed_image_height <= 0:
+            return
+
+        old_zoom = self.zoom
+        mouse_x, mouse_y = self.last_mouse_x, self.last_mouse_y
+
+        # Позиция в текстурных координатах до зума
+        center_offset_x = (self.width - self.displayed_image_width * old_zoom) * 0.5
+        center_offset_y = (self.height - self.displayed_image_height * old_zoom) * 0.5
+        tex_pos_x = mouse_x - center_offset_x + self.pan_x
+        tex_pos_y = mouse_y - center_offset_y + self.pan_y
+
         zoom_speed = 1.1
         if yoffset > 0:
             self.display_width *= zoom_speed
         else:
             self.display_width /= zoom_speed
         self.display_width = max(100.0, min(16000.0, self.display_width))
+
+        new_zoom = self.zoom
+        # Корректировка pan чтобы точка под курсором осталась на месте
+        center_offset_x_new = (self.width - self.displayed_image_width * new_zoom) * 0.5
+        center_offset_y_new = (self.height - self.displayed_image_height * new_zoom) * 0.5
+        tex_pos_x_new = tex_pos_x * (new_zoom / old_zoom)
+        tex_pos_y_new = tex_pos_y * (new_zoom / old_zoom)
+        self.pan_x = tex_pos_x_new - mouse_x + center_offset_x_new
+        self.pan_y = tex_pos_y_new - mouse_y + center_offset_y_new
 
     def key_callback(self, window, key, scancode, action, mods):
         if action == glfw.PRESS:
