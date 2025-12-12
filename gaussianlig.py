@@ -43,7 +43,7 @@ class LIG(nn.Module):
                 img_small = torch.nn.functional.interpolate(
                     gt_image, size=(H, W), mode='area'
                 )
-                dog_weights = fast_dog(img_small, sigma=1.2, k=1.6)
+                dog_weights = fast_dog(img_small, sigma=2.5, k=1.6)
 
             self.level_models.append(Gaussian2D(loss_type=self.loss_type, opt_type=kwargs['opt_type'],
                                                    num_points=num_points,
