@@ -123,3 +123,17 @@ def build_triangular(r):
     R[:, 1, 0] = r[:, 1]
     R[:, 1, 1] = r[:, 2]
     return R
+
+
+@torch.compile
+def _elongation_penalty(chol: torch.Tensor) -> torch.Tensor:
+    """chol: [N, 3] — L11, L21, L22"""
+    # Σ = [[L11², L11*L21], [L11*L21, L21² + L22²]]
+    L11, L21, L22 = chol[:, 0], chol[:, 1], chol[:, 2]
+    a = L11 ** 2
+    c = L21 ** 2 + L22 ** 2
+    b = L11 * L21
+    trace = a + c
+    det = a * c - b ** 2
+    # trace²/det = r + 2 + 1/r, где r = λ_max/λ_min; при r=8: ≈10.125
+    return F.relu((trace * trace) / det.clamp(min=1e-8) - 10.125).mean()
