@@ -51,10 +51,11 @@ class LIG(nn.Module):
                                                    H=H, W=W, BLOCK_H=kwargs['BLOCK_H'], BLOCK_W=kwargs['BLOCK_W'],
                                                    device=kwargs['device'], lr=kwargs['lr'],
                                                    iterations=iterations,
-                                                   init_weights=dog_weights))
+                                                   init_weights=dog_weights,
+                                                   init_mode=kwargs.get('init_mode', 'dog')))
 
 class Gaussian2D(nn.Module):
-    def __init__(self, loss_type="L2", init_weights=None, **kwargs):
+    def __init__(self, loss_type="L2", init_weights=None, init_mode='dog', **kwargs):
         super().__init__()
         self.loss_type = loss_type
         self.init_num_points = kwargs["num_points"]
@@ -66,8 +67,9 @@ class Gaussian2D(nn.Module):
 
         self.last_size = (self.H, self.W)
         self.loss_weights: torch.Tensor | None = None
+        self.init_mode = init_mode
 
-        self.means = nn.Parameter(self._sample_positions(init_weights))
+        self.means = nn.Parameter(self._sample_positions(init_weights if init_mode == 'dog' else None))
 
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3, device=self.device))
         d = 3
