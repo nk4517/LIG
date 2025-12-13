@@ -122,10 +122,12 @@ class SimpleTrainer2d:
                 else:
                     img_target = self.gt_image
                 
+                img_target_display = img_target  # downscaled для GUI (до преобразований в residual)
+                
                 if scale_idx != 0:
                     im_estim_prev = torch.nn.functional.interpolate(im_estim,
                                                                     size = (img_target.shape[2], img_target.shape[3]),
-                                                                    mode='bilinear')
+                                                                    mode='bicubic', antialias=True)
                     del im_estim
                     if self.save_imgs:
                         transform = transforms.ToPILImage()
