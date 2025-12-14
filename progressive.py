@@ -119,13 +119,46 @@ class ProgressiveTrainer:
                 desc=f"Stage {stage_idx} (1/{stage.scale:.0f}x, {self.model.num_points} pts)"
             )
             self.model.train()
+            points_added = False
             
-            for iter in range(1, stage.iterations + 1):
-                
+            for iter in progress_bar:
                 loss, psnr = self.model.train_iter(target)
                 psnr_list.append(psnr)
                 iter_list.append(global_iter)
                 global_iter += 1
+                
+                # Добавление точек после warmup
+                if not points_added and points_to_add_now > 0 and iter >= warmup_iters:
+                    with torch.no_grad():
+                        rendered = self.model()["render"]
+                        weights_dog = fast_dog(target, sigma=2.5, k=3)
+                        weights_error = self._compute_error_weights(rendered, target)
+                        if self.add_points_mode == "dog":
+                            p95 = torch.quantile(weights_dog.flatten(), 0.95)
+                            dog_norm = torch.clamp(weights_dog / (p95 + 1e-8), max=1.0)
+                            weights = 1.0 + 1.0 * dog_norm
+                        elif self.add_points_mode == "error":
+                            weights = weights_error
+                        else:
+                            weights = weights_dog + weights_error * 100
+                    self.model.add_points(points_to_add_now, weights, target)
+                    progress_bar.set_description(f"Stage {stage_idx} (1/{stage.scale:.0f}x, {self.model.num_points} pts)")
+                    self.logwriter.write(
+                        f"Stage {stage_idx}: added {points_to_add_now} points after {warmup_iters} warmup iters, "
+                        f"total now {self.model.num_points}"
+                    )
+                    points_added = True
+                
+                # Периодическое досыпание на высоких разрешениях
+                if max(self.H, self.W) > 5000 and iter > warmup_iters:
+                    if (iter - warmup_iters) % 500 == 0 and iter != warmup_iters:
+                        batch_size = max(1000, self.model.num_points // 200)
+                        self.model.add_points(batch_size, target_image=target)
+                        self.logwriter.write(
+                            f"Stage {stage_idx}: periodic +{batch_size} random pts at iter {iter}, "
+                            f"total {self.model.num_points}"
+                        )
+                        progress_bar.set_description(f"Stage {stage_idx} (1/{stage.scale:.0f}x, {self.model.num_points} pts)")
                 
                 with torch.no_grad():
                     if iter % 10 == 0:
@@ -133,7 +166,6 @@ class ProgressiveTrainer:
                             "Loss": f"{loss.item():.7f}",
                             "PSNR": f"{psnr:.4f}"
                         })
-                        progress_bar.update(10)
                     
                     if self.gui:
                         self.gui.try_capture(
@@ -222,7 +254,7 @@ def parse_args(argv):
                         help="Comma-separated scale divisors (e.g., '12,4,1' means 1/12, 1/4, 1/1)")
     parser.add_argument("--total_iters", type=int, default=6000,
                         help="Total iterations (distributed proportionally to stage areas)")
-    parser.add_argument("--add_points_mode", type=str, default="dog+error",
+    parser.add_argument("--add_points_mode", type=str, default="dog",
                         choices=["dog", "error", "dog+error"], help="Point placement weights: error map or DoG")
     
     return parser.parse_args(argv)
