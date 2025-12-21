@@ -113,13 +113,22 @@ class ProgressiveGaussian2D(nn.Module):
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             self.optimizer, T_0=self.iterations, T_mult=1, eta_min=self.lr * 0.01)
 
-    def add_points(self, num_new: int, weights: torch.Tensor):
+    def add_points(self, num_new: int, weights: torch.Tensor | None = None,
+                   target_image: torch.Tensor | None = None):
         """Add new points with positions sampled from weights distribution"""
         with torch.no_grad():
             new_means = self._sample_positions(num_new, self.H, self.W, weights)
             new_cholesky = torch.rand(num_new, 3, device=self.device)
             new_opacity_logits = torch.zeros(num_new, device=self.device)
-            new_rgb_logits = torch.zeros(num_new, 3, device=self.device)
+            
+            if target_image is not None:
+                # Сэмплировать цвет из target_image [1, 3, H, W] по позициям new_means
+                x_coords = new_means[:, 0].long().clamp(0, self.W - 1)
+                y_coords = new_means[:, 1].long().clamp(0, self.H - 1)
+                colors = target_image[0, :, y_coords, x_coords].T  # [num_new, 3]
+                new_rgb_logits = torch.logit(colors.clamp(0.001, 0.999))
+            else:
+                new_rgb_logits = torch.zeros(num_new, 3, device=self.device)
 
             # Concatenate with existing
             self.means = nn.Parameter(torch.cat([self.means.data, new_means], dim=0))
