@@ -56,9 +56,11 @@ class SimpleTrainer2d:
         if model_name == "LIG":
             from gaussianlig import LIG
             self.gaussian_model = LIG(loss_type="L2", opt_type="adan",
-                                      gt_image=self.gt_image, num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
+                                      gt_image=self.gt_image, num_points=self.num_points,
+                                      n_scales=args.n_scales, allo_ratio=args.allo_ratio,
                                       H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
-                                      device=self.device, lr=args.lr).to(self.device)
+                                      device=self.device, lr=args.lr, iterations=self.iterations,
+                                      init_mode=args.init_mode).to(self.device)
 
         self.logwriter = LogWriter(self.log_dir)
 
@@ -283,6 +285,7 @@ def parse_args(argv):
     )
     parser.add_argument("--n_scales", type=int, default=2)
     parser.add_argument("--allo_ratio", type=float, default=0.5)
+    parser.add_argument("--init_mode", type=str, default='dog', choices=['dog', 'grid'], help="Position init: dog-weighted or uniform grid")
     parser.add_argument("--model_path", type=str, default=None, help="Path to a checkpoint")
     parser.add_argument("--seed", type=float, default=1, help="Set random seed for reproducibility")
     parser.add_argument("--save_imgs", action="store_true", help="Save image")
