@@ -2,6 +2,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include "floatN.cuh"
 
 __global__ void gradient_aware_upscale_kernel(
     const int dst_h,

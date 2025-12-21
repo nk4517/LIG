@@ -1,6 +1,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include "floatN.cuh"
 
 // compute the 2d gaussian parameters from 3d gaussian parameters
 __global__ void project_gaussians_forward_kernel(
