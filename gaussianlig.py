@@ -45,10 +45,12 @@ class LIG(nn.Module):
                 )
                 dog_weights = fast_dog(img_small, sigma=1.25, k=2.6)
 
+            iterations = kwargs.get("iterations", 3000)
             self.level_models.append(Gaussian2D(loss_type=self.loss_type, opt_type=kwargs['opt_type'],
                                                    num_points=num_points,
                                                    H=H, W=W, BLOCK_H=kwargs['BLOCK_H'], BLOCK_W=kwargs['BLOCK_W'],
                                                    device=kwargs['device'], lr=kwargs['lr'],
+                                                   iterations=iterations,
                                                    init_weights=dog_weights))
 
 class Gaussian2D(nn.Module):
@@ -93,7 +95,10 @@ class Gaussian2D(nn.Module):
             ],
                 betas=(0.98, 0.92, 0.99),
                 fused=True)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=70000, gamma=0.7)
+        
+        iterations = kwargs.get("iterations", 3000)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=iterations, T_mult=1, eta_min=kwargs["lr"] * 0.01)
 
     _MULTINOMIAL_LIMIT = 2**24 - 1 # 4096x4096
 
