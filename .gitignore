@@ -11,3 +11,5 @@ dataset/*
 results/*
 figure/*
 *build*
+.idea/
+gsplat2d/.idea/
