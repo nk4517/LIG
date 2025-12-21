@@ -16,6 +16,10 @@ import random
 import torchvision.transforms as transforms
 import threading
 
+sys.path.insert(0, '../splatting_app/gsplat-2025/examples')
+from lib_dog import fast_dog
+
+
 if typing.TYPE_CHECKING:
     from gui.model_visualizers import LIGVisualizerGUI
 
@@ -52,7 +56,7 @@ class SimpleTrainer2d:
         if model_name == "LIG":
             from gaussianlig import LIG
             self.gaussian_model = LIG(loss_type="L2", opt_type="adan",
-                                      num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
+                                      gt_image=self.gt_image, num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
                                       H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                       device=self.device, lr=args.lr).to(self.device)
 
@@ -128,6 +132,12 @@ class SimpleTrainer2d:
                         im_estim_prev_img.save(str(self.log_dir / name))
 
                     img_target = img_target - im_estim_prev
+
+                    # L2 error map для взвешенной инициализации позиций (до нормализации)
+                    l2_error_map = (img_target ** 2).mean(dim=1, keepdim=True)  # [1, 1, H, W]
+                    self.gaussian_model.level_models[scale_idx].to(self.device)
+                    self.gaussian_model.level_models[scale_idx].reinit_positions(l2_error_map)
+
                     im_estim_prev = im_estim_prev.cpu()
                     img_target += 0.5
 
@@ -152,6 +162,13 @@ class SimpleTrainer2d:
                     self.gaussian_model.store_max.append(store_max)
 
                 torch.cuda.empty_cache()
+                
+                dog_weights = fast_dog(img_target, sigma=1.25, k=2.6)
+
+                # p95 = torch.quantile(dog_weights.flatten(), 0.95)
+                # dog_norm = torch.clamp(dog_weights / (p95 + 1e-8), max=1.0)
+                # weights = 1.0 + 1.0 * dog_norm
+                self.gaussian_model.level_models[scale_idx].set_loss_weights(None)
                 progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
                 self.gaussian_model.level_models[scale_idx].train()
                 
