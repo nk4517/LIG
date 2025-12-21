@@ -1,3 +1,7 @@
+import sys
+
+sys.path.insert(0, '../splatting_app/gsplat-2025/examples')
+from lib_dog import fast_dog
 from gsplat2d.project_gaussians_cholesky import project_gaussians_cholesky
 from gsplat2d.rasterize import rasterize_gaussians
 from utils import *
@@ -8,7 +12,7 @@ import math
 from adan import Adan
 
 class LIG(nn.Module):
-    def __init__(self, loss_type="L2", **kwargs):
+    def __init__(self, loss_type="L2", gt_image=None, **kwargs):
         super().__init__()
         self.loss_type = loss_type
         self.init_num_points = kwargs["num_points"]
@@ -33,13 +37,22 @@ class LIG(nn.Module):
                 for i in range(s):
                     num_points -= int(kwargs["num_points"] * pow(2.0, (-self.n_scales + i + 1)*2) * self.allo_ratio)
 
+            # Для первого уровня - взвешенная инициализация по DoG
+            dog_weights = None
+            if s == 0 and gt_image is not None:
+                img_small = torch.nn.functional.interpolate(
+                    gt_image, size=(H, W), mode='area'
+                )
+                dog_weights = fast_dog(img_small, sigma=1.25, k=2.6)
+
             self.level_models.append(Gaussian2D(loss_type=self.loss_type, opt_type=kwargs['opt_type'],
                                                    num_points=num_points,
                                                    H=H, W=W, BLOCK_H=kwargs['BLOCK_H'], BLOCK_W=kwargs['BLOCK_W'],
-                                                   device=kwargs['device'], lr=kwargs['lr']))
+                                                   device=kwargs['device'], lr=kwargs['lr'],
+                                                   init_weights=dog_weights))
 
 class Gaussian2D(nn.Module):
-    def __init__(self, loss_type="L2", **kwargs):
+    def __init__(self, loss_type="L2", init_weights=None, **kwargs):
         super().__init__()
         self.loss_type = loss_type
         self.init_num_points = kwargs["num_points"]
@@ -50,10 +63,9 @@ class Gaussian2D(nn.Module):
         self.device = kwargs["device"]
 
         self.last_size = (self.H, self.W)
+        self.loss_weights: torch.Tensor | None = None
 
-        w_init = torch.rand(self.init_num_points, 1, device=self.device) * self.W
-        h_init = torch.rand(self.init_num_points, 1, device=self.device) * self.H
-        self.means = nn.Parameter(torch.cat((w_init, h_init), dim=1))
+        self.means = nn.Parameter(self._sample_positions(init_weights))
 
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3, device=self.device))
         d = 3
@@ -82,6 +94,69 @@ class Gaussian2D(nn.Module):
                 betas=(0.98, 0.92, 0.99),
                 fused=True)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=70000, gamma=0.7)
+
+    _MULTINOMIAL_LIMIT = 2**24 - 1 # 4096x4096
+
+    def _sample_positions(self, weights: torch.Tensor | None) -> torch.Tensor:
+        """Выборка позиций: взвешенная если weights не None, иначе равномерная"""
+        if self.init_mode == 'grid':
+            aspect = self.W / self.H
+            ny = max(1, int(math.sqrt(self.init_num_points / aspect)))
+            nx = max(1, int(self.init_num_points / ny))
+            ys = torch.linspace(0.5, self.H - 0.5, ny, device=self.device)
+            xs = torch.linspace(0.5, self.W - 0.5, nx, device=self.device)
+            grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
+            positions = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=1)
+            if positions.shape[0] < self.init_num_points:
+                extra = self.init_num_points - positions.shape[0]
+                extra_pos = torch.rand(extra, 2, device=self.device) * torch.tensor([self.W, self.H], device=self.device)
+                positions = torch.cat([positions, extra_pos], dim=0)
+            return positions[:self.init_num_points]
+        
+        if weights is not None:
+            weights = weights.squeeze()
+            weights = (weights - weights.min())
+            weights = weights / weights.sum()
+            
+            h_orig, w_orig = weights.shape
+            total_pixels = h_orig * w_orig
+            
+            if total_pixels > self._MULTINOMIAL_LIMIT:
+                scale = (self._MULTINOMIAL_LIMIT / total_pixels) ** 0.5
+                h_dim, w_dim = max(1, int(h_orig * scale)), max(1, int(w_orig * scale))
+                weights = torch.nn.functional.interpolate(
+                    weights.unsqueeze(0).unsqueeze(0), size=(h_dim, w_dim), mode='area'
+                ).squeeze()
+                weights = (weights - weights.min())
+                weights = weights / weights.sum()
+                scale_h, scale_w = h_orig / h_dim, w_orig / w_dim
+            else:
+                h_dim, w_dim = h_orig, w_orig
+                scale_h, scale_w = 1.0, 1.0
+            
+            indices = torch.multinomial(weights.flatten().to(self.device), self.init_num_points, replacement=True)
+            w_init = ((indices % w_dim).float() + torch.rand(self.init_num_points, device=self.device)) * scale_w
+            h_init = ((indices // w_dim).float() + torch.rand(self.init_num_points, device=self.device)) * scale_h
+        else:
+            w_init = torch.rand(self.init_num_points, device=self.device) * self.W
+            h_init = torch.rand(self.init_num_points, device=self.device) * self.H
+        
+        return torch.stack((w_init, h_init), dim=1).to(self.device)
+
+    def reinit_positions(self, weights: torch.Tensor):
+        with torch.no_grad():
+            self.means.data = self._sample_positions(weights)
+
+    def set_loss_weights(self, weights: torch.Tensor | None):
+        """Установка DoG весов для взвешивания лосса. dog: [1, 1, H, W] или [H, W]"""
+        if weights is None:
+            self.loss_weights = weights
+            return
+        weights = weights.clone().squeeze()
+        weights -= weights.min()
+        if weights.max() > 0:
+            weights /= weights.max()
+        self.loss_weights = weights.to(self.device)
 
     @property
     def cholesky(self):
@@ -132,7 +207,14 @@ class Gaussian2D(nn.Module):
     def train_iter(self, gt_image):
         render_pkg = self.forward()
         image = render_pkg["render"]
-        loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        if self.loss_weights is not None:
+            weight_map = self.loss_weights.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            per_pixel_loss = ((image - gt_image) ** 2).mean(dim=1, keepdim=True)  # [1, 1, H, W]
+            weighted_loss = (per_pixel_loss * weight_map).sum() / weight_map.sum()
+            loss = weighted_loss
+        else:
+            loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        
         loss.backward()
         with torch.no_grad():
             mse_loss = F.mse_loss(image, gt_image)
