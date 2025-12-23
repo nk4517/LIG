@@ -9,7 +9,7 @@ import torch
 from .visualizer import VisualizerGUI
 from .common import VisMode, GradientMode, ShaderBinding, _make_checkerboard, chw_to_gl_rgba, hwc_to_gl_rgba, gradient_to_gl
 from upscaler_torch import torch_gradient_aware_upscale
-from gsplat2d import gradient_aware_spline_upscale
+from gsplat2d import gradient_aware_upscale
 
 if typing.TYPE_CHECKING:
     from gaussianlig import LIG
