@@ -62,9 +62,20 @@ class Gaussian2D(nn.Module):
         self.rgbs.requires_grad = True
 
         if kwargs["opt_type"] == "adam":
-            self.optimizer = torch.optim.Adam([self.rgbs, self.means, self.cov2d], lr=kwargs["lr"])
+            self.optimizer = torch.optim.Adam([
+                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self.means, 'lr': kwargs["lr"] * 2},
+                {'params': self.cov2d, 'lr': kwargs["lr"] * 5}
+            ])
         else:
-            self.optimizer = Adan([self.rgbs, self.means, self.cov2d], lr=kwargs["lr"])
+            s = 1
+            self.optimizer = Adan([
+                {'params': self.rgbs, 'lr': kwargs["lr"]},
+                {'params': self.means, 'lr': kwargs["lr"] * 2 * s},
+                {'params': self.cov2d, 'lr': kwargs["lr"] * 5 * s},
+            ],
+                betas=(0.98, 0.92, 0.99),
+                fused=True)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=70000, gamma=0.7)
 
     def forward(self):
