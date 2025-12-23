@@ -12,6 +12,8 @@ class VisMode(IntEnum):
     GROUND_TRUTH = 3
     GRADIENTS = 4
     WSUM = 5
+    UPSCALED_TORCH = 6
+    UPSCALED_CUDA = 7
 
 
 class GradientMode(IntEnum):
