@@ -110,7 +110,7 @@ class Gaussian2D(nn.Module):
             self.B_SIZE,
             self.opacities
         )
-        out_img = rasterize_gaussians(
+        out_img, out_wsum, dx, dy, dxy = rasterize_gaussians(
                 xys,
                 extents,
                 conics,
@@ -120,11 +120,12 @@ class Gaussian2D(nn.Module):
                 self.H,
                 self.W,
                 self.B_SIZE,
-            )[0][..., :3]
+                compute_upscale_gradients=True
+            )
 
-        out_img = torch.clamp(out_img, 0, 1)
-        out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
-        return {"render": out_img}
+        out_img_r = out_img[..., :3].view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
+
+        return {"render": out_img_r, "render_hwc": out_img, "wsum": out_wsum, "dx": dx, "dy": dy, "dxy": dxy}
 
     def train_iter(self, gt_image):
         render_pkg = self.forward()
