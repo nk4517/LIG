@@ -16,7 +16,7 @@ except ImportError:
     CUDA_AVAILABLE = False
 
 from .cmap_batlow import batlow as BATLOW_CMAP
-from .common import VisMode
+from .common import VisMode, GradientMode, ShaderBinding
 
 
 @dataclass
@@ -217,6 +217,8 @@ class VisualizerGUI:
         self.textures = {}
 
         self.colormap_lut_program = None
+        self.magnitude_lut_program = None
+        self.gradient_lut_program = None
 
         self.programs: dict[str, int] = {}
         self.show_info = True
@@ -226,7 +228,9 @@ class VisualizerGUI:
 
         # Visualization mode
         self.vis_mode = VisMode.RENDER
+        self.gradient_mode = GradientMode.MAGNITUDE
         self.active_vis_mode = VisMode.RENDER
+        self.active_gradient_mode = GradientMode.MAGNITUDE
 
     @property
     def zoom(self):
@@ -268,15 +272,21 @@ class VisualizerGUI:
         texture_fragment = load_shader(shader_dir / "texture.frag")
         upscale_fragment = load_shader(shader_dir / "upscale.frag")
         colormap_lut_fragment = load_shader(shader_dir / "colormap_lut.frag")
+        magnitude_lut_fragment = load_shader(shader_dir / "magnitude_lut.frag")
+        gradient_lut_fragment = load_shader(shader_dir / "gradient_lut.frag")
 
         self.program = compile_shaders(vertex_source, texture_fragment)
         self.upscale_program = compile_shaders(vertex_source, upscale_fragment)
         self.colormap_lut_program = compile_shaders(vertex_source, colormap_lut_fragment)
+        self.magnitude_lut_program = compile_shaders(vertex_source, magnitude_lut_fragment)
+        self.gradient_lut_program = compile_shaders(vertex_source, gradient_lut_fragment)
 
         self.programs = {
             'texture': self.program,
             'upscale': self.upscale_program,
             'colormap_lut': self.colormap_lut_program,
+            'magnitude_lut': self.magnitude_lut_program,
+            'gradient_lut': self.gradient_lut_program,
         }
 
         self.textures['viridis'] = TextureSlot(gl_id=_create_lut_texture('viridis'))
@@ -288,6 +298,9 @@ class VisualizerGUI:
         # Создаём текстуры согласно TEXTURE_SLOTS
         for name, filt in self.TEXTURE_SLOTS:
             self.textures[name] = TextureSlot(gl_id=_create_texture(filt))
+        
+        # Separate always-nearest texture for upscale/colormap/gradient shaders
+        self.textures['nearest_src'] = TextureSlot(gl_id=_create_texture(gl.GL_NEAREST))
 
         glfw.swap_interval(1)
 
@@ -402,12 +415,26 @@ class VisualizerGUI:
                 self.vis_mode = VisMode.RENDER
                 self.view_dirty.set()
                 self.gui_ready.set()
+            elif key == glfw.KEY_2:
+                self.vis_mode = VisMode.UPSCALED
+                self.view_dirty.set()
+                self.gui_ready.set()
             elif key == glfw.KEY_3:
                 self.vis_mode = VisMode.TARGET
                 self.view_dirty.set()
                 self.gui_ready.set()
             elif key == glfw.KEY_4:
                 self.vis_mode = VisMode.GROUND_TRUTH
+                self.view_dirty.set()
+                self.gui_ready.set()
+            elif key == glfw.KEY_5:
+                # Переключение градиентов по кругу
+                if self.vis_mode != VisMode.GRADIENTS:
+                    self.vis_mode = VisMode.GRADIENTS
+                    self.gradient_mode = GradientMode.MAGNITUDE
+                else:
+                    # Циклическое переключение между dx, dy, dxy, magnitude
+                    self.gradient_mode = GradientMode((self.gradient_mode + 1) % 4)
                 self.view_dirty.set()
                 self.gui_ready.set()
             elif key == glfw.KEY_6:
@@ -598,6 +625,13 @@ class VisualizerGUI:
             self.view_dirty.set()
             self.gui_ready.set()
 
+        # Градиенты - показываем текущий режим
+        gradient_label = f"Gradients [{self.gradient_mode.name}] [5]"
+        if imgui.radio_button(gradient_label, self.vis_mode == VisMode.GRADIENTS):
+            self.vis_mode = VisMode.GRADIENTS
+            self.view_dirty.set()
+            self.gui_ready.set()
+
         if imgui.radio_button("Wsum [6]", self.vis_mode == VisMode.WSUM):
             self.vis_mode = VisMode.WSUM
             self.view_dirty.set()
@@ -634,7 +668,11 @@ class VisualizerGUI:
         imgui.set_next_window_size(300, 400)
         imgui.begin("Info")
         imgui.text(f"Mode: {'CUDA' if self.use_cuda else 'CPU'}")
-        imgui.text(f"View: {self.vis_mode.name}")
+        # Для градиентов показываем подрежим
+        if self.vis_mode == VisMode.GRADIENTS:
+            imgui.text(f"View: {self.vis_mode.name} ({self.gradient_mode.name})")
+        else:
+            imgui.text(f"View: {self.vis_mode.name}")
         imgui.separator()
         imgui.text(f"Iteration: {self.current_iter}")
         imgui.text(f"PSNR: {self.current_psnr:.2f} dB")
@@ -658,6 +696,7 @@ class VisualizerGUI:
         imgui.text("R - Reset view")
         imgui.text("0 - Set zoom to 1.0")
         imgui.text("1-6 - Switch view mode")
+        imgui.text("5 - Cycle gradients")
         imgui.text("6 - Wsum view")
         imgui.text("ESC - Exit")
         imgui.end()

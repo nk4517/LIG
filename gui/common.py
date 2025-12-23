@@ -7,9 +7,18 @@ import torch
 
 class VisMode(IntEnum):
     RENDER = 0
+    UPSCALED = 1
     TARGET = 2
     GROUND_TRUTH = 3
+    GRADIENTS = 4
     WSUM = 5
+
+
+class GradientMode(IntEnum):
+    DX = 0
+    DY = 1
+    DXY = 2
+    MAGNITUDE = 3
 
 @dataclass
 class ShaderBinding:
