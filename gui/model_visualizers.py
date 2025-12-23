@@ -93,6 +93,8 @@ class Gaussian2DVisualizerGUI(VisualizerGUI):
         return False
 
     def get_shader_binding(self, vis_mode: VisMode, gradient_mode: GradientMode) -> ShaderBinding:
+        if vis_mode in (VisMode.UPSCALED_TORCH, VisMode.UPSCALED_CUDA):
+            return ShaderBinding(program='texture', textures={'texSampler': 'render'})
         if vis_mode == VisMode.UPSCALED:
             return ShaderBinding(
                 program='upscale',
@@ -181,6 +183,19 @@ class Gaussian2DVisualizerGUI(VisualizerGUI):
             return result
 
         if render_hwc is None:
+            return result
+
+        if vis_mode == VisMode.UPSCALED_TORCH and dx is not None and dy is not None and dxy is not None:
+            if target_size is not None and target_size[0] > 0 and target_size[1] > 0:
+                render_hwc = torch_gradient_aware_upscale(render_hwc, dx, dy, dxy, target_size[0], target_size[1])
+            result["render"] = hwc_to_gl_rgba(render_hwc)
+            return result
+
+        if vis_mode == VisMode.UPSCALED_CUDA and dx is not None and dy is not None and dxy is not None:
+            if target_size is not None and target_size[0] > 0 and target_size[1] > 0:
+                new_h, new_w = target_size
+                render_hwc = gradient_aware_upscale(render_hwc, dx, dy, dxy, new_h, new_w, roi)
+            result["render"] = hwc_to_gl_rgba(render_hwc)
             return result
 
         rendered_gl = hwc_to_gl_rgba(render_hwc)

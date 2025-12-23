@@ -441,6 +441,14 @@ class VisualizerGUI:
                 self.vis_mode = VisMode.WSUM
                 self.view_dirty.set()
                 self.gui_ready.set()
+            elif key == glfw.KEY_7:
+                self.vis_mode = VisMode.UPSCALED_TORCH
+                self.view_dirty.set()
+                self.gui_ready.set()
+            elif key == glfw.KEY_8:
+                self.vis_mode = VisMode.UPSCALED_CUDA
+                self.view_dirty.set()
+                self.gui_ready.set()
             elif key == glfw.KEY_F:
                 self.use_bilinear_filter = not self.use_bilinear_filter
                 self._update_texture_filters()
@@ -480,6 +488,27 @@ class VisualizerGUI:
                         if self.fit_to_window:
                             self._update_fit_zoom()
 
+                if self.vis_mode in (VisMode.UPSCALED_TORCH, VisMode.UPSCALED_CUDA):
+                    rendered = render_data.get("rendered")
+                    if rendered is not None:
+                        if rendered.dim() == 4:
+                            _, _, src_h, src_w = rendered.shape
+                        else:
+                            _, src_h, src_w = rendered.shape
+                        target_size = (int(src_h * self.zoom), int(src_w * self.zoom))
+
+                        # Compute ROI for UPSCALED_CUDA when zoomed in
+                        if self.vis_mode == VisMode.UPSCALED_CUDA and self.zoom >= 1.0:
+                            center_offset_x = (self.width - src_w * self.zoom) * 0.5
+                            center_offset_y = (self.height - src_h * self.zoom) * 0.5
+                            x1_src = (self.pan_x - center_offset_x) / self.zoom
+                            y1_src = (self.pan_y - center_offset_y) / self.zoom
+                            x2_src = x1_src + self.width / self.zoom
+                            y2_src = y1_src + self.height / self.zoom
+                            x1, y1 = max(0.0, x1_src), max(0.0, y1_src)
+                            x2, y2 = min(float(src_w), x2_src), min(float(src_h), y2_src)
+                            roi = (x1, y1, x2, y2)
+                            target_size = (round((y2 - y1) * self.zoom), round((x2 - x1) * self.zoom))
 
                 prepared = self.prepare_for_display(
                     render_data, self.vis_mode, self.gradient_mode, target_size, roi)
@@ -574,6 +603,17 @@ class VisualizerGUI:
                            float(self.displayed_image_height * self.zoom))
 
         self._set_common_uniforms(prog, skip_texture_size=binding.skip_texture_size)
+
+        # UPSCALED_TORCH/CUDA: texture already upscaled - use its actual size with zoom=1
+        if self.active_vis_mode in (VisMode.UPSCALED_TORCH, VisMode.UPSCALED_CUDA):
+            tex_slot = self.textures.get('render')
+            if tex_slot and tex_slot.width > 0:
+                gl.glUniform2f(gl.glGetUniformLocation(prog, "texture_size"),
+                               float(tex_slot.width), float(tex_slot.height))
+                gl.glUniform1f(gl.glGetUniformLocation(prog, "zoom"), 1.0)
+                # UPSCALED_CUDA renders to window size with ROI - no pan needed
+                if self.active_vis_mode == VisMode.UPSCALED_CUDA:
+                    gl.glUniform2f(gl.glGetUniformLocation(prog, "pan"), 0.0, 0.0)
 
     def _draw_gui(self):
         """Draw ImGui interface"""
@@ -698,6 +738,8 @@ class VisualizerGUI:
         imgui.text("1-6 - Switch view mode")
         imgui.text("5 - Cycle gradients")
         imgui.text("6 - Wsum view")
+        imgui.text("7 - Upscale Torch")
+        imgui.text("8 - Upscale CUDA")
         imgui.text("ESC - Exit")
         imgui.end()
 
