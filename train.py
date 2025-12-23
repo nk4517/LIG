@@ -41,7 +41,7 @@ class SimpleTrainer2d:
 
         if model_name == "LIG":
             from gaussianlig import LIG
-            self.gaussian_model = LIG(loss_type="L2", opt_type="adam", 
+            self.gaussian_model = LIG(loss_type="L2", opt_type="adan",
                                       num_points=self.num_points, n_scales=args.n_scales, allo_ratio=args.allo_ratio,
                                       H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                       device=self.device, lr=args.lr).to(self.device)
