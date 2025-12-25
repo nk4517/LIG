@@ -28,6 +28,7 @@ import torchvision.transforms as transforms
 
 import threading
 
+from LIG.init_splats123 import init_splats
 from gui.model_visualizers import Gaussian2DVisualizerGUI
 
 from optimizer import Adan
@@ -35,6 +36,9 @@ from gsplat2d.rasterize import rasterize_gaussians
 from gsplat2d.project_gaussians_cholesky import project_gaussians_cholesky
 from gsplat2d.upscale import gradient_aware_upscale
 from upscaler_torch import torch_gradient_aware_upscale
+import sys
+sys.path.insert(0, '../splatting_app/gsplat-2025/examples')
+from lib_dog import fast_dog
 
 
 # ============ CONFIG ============
@@ -199,10 +203,22 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
     else:
         H_model, W_model = H_gt, W_gt
 
+    # positions, rgbs, scales = init_splats(num_points, H_train, W_train, device, image=gt_image)
+    # positions = rgbs = scales = None
+
     gt_for_init = gt_image if gt_image.shape[2:] == (H_model, W_model) else F.interpolate(gt_image, size=(H_model, W_model), mode='area')
 
-    positions, rgbs, scales = init_splats_simple(num_points, H_model, W_model, device, mode="grid", image=gt_for_init)
-    actual_num_points = positions.shape[0]
+    # # DoG-weighted initialization
+    dog_weights = fast_dog(gt_for_init, sigma=1.5, k=4.6)
+    p95 = torch.quantile(dog_weights.flatten(), 0.95)
+    dog_norm = torch.clamp(dog_weights / (p95 + 1e-8), max=1.0)
+    dog_weights = 1.0 + 1 * dog_norm
+    dog_weights /= dog_weights.sum()
+
+    positions, rgbs, scales = init_splats(
+        num_points, H_model, W_model, device, image=gt_for_init, mode="grid"
+    )
+    actual_num_points = positions.shape[0] if positions is not None else num_points
     model = Gaussian2DMinimal(actual_num_points, H_model, W_model, device, positions=positions, rgbs=rgbs, scales=scales).to(device)
 
     pos_lr_scale = max(H_model, W_model) / 512.0
@@ -224,6 +240,16 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
     gui.view_dirty.set()
 
     gt_hwc = gt_image.squeeze(0).permute(1, 2, 0)  # [H_train, W_train, C]
+
+    # dog_weights1 = fast_dog(gt_image, sigma=1.5, k=2.6)
+    # p951 = torch.quantile(dog_weights1.flatten(), 0.95)
+    # dog_norm1 = torch.clamp(dog_weights1 / (p95 + 1e-8), max=1.0)
+    # dog_weights1 = 1.0 + 0.5 * dog_norm1
+    # # dog_weights1 /= dog_weights1.sum()
+    #
+    # weight_map = dog_weights1[0, 0, ..., None]  # [1, 1, H, W]
+    weight_map = None
+
     gt_scale = max(H_gt, W_gt) / max(H_model, W_model) if use_upscale else 1.0
 
     start = time.monotonic()
@@ -233,7 +259,14 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
     for it in pbar:
         out = model()
         compare_img = out["render_hwc"] if not use_upscale else upscale_fn(out, H_gt, W_gt, use_torch_upscale)
-        loss = F.mse_loss(compare_img, gt_hwc)
+
+        if weight_map is not None:
+
+            per_pixel_loss = ((compare_img - gt_hwc) ** 2).mean(dim=-1, keepdim=True)  # [1, 1, H, W]
+            weighted_loss = (per_pixel_loss * weight_map).sum()
+            loss = weighted_loss
+        else:
+            loss = F.mse_loss(compare_img, gt_hwc)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
