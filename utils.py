@@ -123,3 +123,26 @@ def build_triangular(r):
     R[:, 1, 0] = r[:, 1]
     R[:, 1, 1] = r[:, 2]
     return R
+
+
+# @torch.compile
+@torch.jit.script
+def _covariance_penalty(chol: torch.Tensor, min_size: float = 0.1) -> torch.Tensor:
+    """chol: [N, 3] — L11, L21, L22"""
+    # Σ = [[L11², L11*L21], [L11*L21, L21² + L22²]]
+    L11, L21, L22 = chol[:, 0], chol[:, 1], chol[:, 2]
+    a = L11 ** 2
+    c = L21 ** 2 + L22 ** 2
+    b = L11 * L21
+    trace = a + c
+    det = a * c - b ** 2
+    # trace²/det = r + 2 + 1/r, где r = λ_max/λ_min; при r=8: ≈10.125
+    elong_x = (trace * trace) / det.clamp(min=1e-4) - 20.125
+    elongation = 0.5 * (elong_x + torch.sqrt(elong_x * elong_x + 0.25))
+    
+    # # Штраф за мелкие сплаты: λ_min < min_size² (полуось < min_size px)
+    # discriminant = (trace * trace - 4 * det).clamp(min=0)
+    # lambda_min = 0.5 * (trace - torch.sqrt(discriminant.clamp(min=1e-4)))
+    # small_x = min_size * min_size - lambda_min
+    # too_small = 0.5 * (small_x + torch.sqrt(small_x * small_x + 0.25))
+    return elongation.mean()# + too_small.mean() * 0.00025
