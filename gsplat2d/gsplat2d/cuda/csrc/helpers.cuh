@@ -1,4 +1,5 @@
 #include "config.h"
+#include "helper_math.h"
 #include <cuda_runtime.h>
 #include "third_party/glm/glm/glm.hpp"
 #include "third_party/glm/glm/gtc/type_ptr.hpp"
@@ -107,14 +108,4 @@ inline __device__ void warpSum2(float2& val, cg::thread_block_tile<32>& tile){
 
 inline __device__ void warpSum(float& val, cg::thread_block_tile<32>& tile){
     val = cg::reduce(tile, val, cg::plus<float>());
-}
-
-inline __host__ __device__ float3 operator*(float3 a, float b) {
-    return make_float3(a.x * b, a.y * b, a.z * b);
-}
-
-inline __host__ __device__ void operator+=(float3 &a, float3 b) {
-    a.x += b.x;
-    a.y += b.y;
-    a.z += b.z;
 }
