@@ -26,6 +26,10 @@ import torch.nn.functional as F
 from PIL import Image
 import torchvision.transforms as transforms
 
+import threading
+
+from gui.model_visualizers import Gaussian2DVisualizerGUI
+
 from optimizer import Adan
 from gsplat2d.rasterize import rasterize_gaussians
 from gsplat2d.project_gaussians_cholesky import project_gaussians_cholesky
@@ -212,10 +216,18 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
         optimizer, T_0=iterations, T_mult=1, eta_min=lr * 0.01
     )
 
+    gui = Gaussian2DVisualizerGUI(width=1280, height=720, use_cuda=True)
+    gui.set_model(model, gt_image)
+    gui_thread = threading.Thread(target=gui.run)
+    gui_thread.start()
+    gui.gui_ready.set()
+    gui.view_dirty.set()
+
     gt_hwc = gt_image.squeeze(0).permute(1, 2, 0)  # [H_train, W_train, C]
     gt_scale = max(H_gt, W_gt) / max(H_model, W_model) if use_upscale else 1.0
 
     start = time.monotonic()
+    last_gui_update = start
     psnr = 0.0
     pbar = tqdm(range(1, iterations + 1), desc="Training")
     for it in pbar:
@@ -228,10 +240,23 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
         optimizer.step()
         scheduler.step()
 
-        if it % 100 == 0:
-            with torch.no_grad():
+        with torch.no_grad():
+            now = time.monotonic()
+            gui_update_due = now - last_gui_update >= 0.1
+            need_psnr = it % 100 == 0 or (gui_update_due and gui_thread.is_alive())
+            if need_psnr:
                 mse = F.mse_loss(compare_img, gt_hwc)
                 psnr = 10 * math.log10(1.0 / mse.item())
+
+            if gui_update_due:
+                last_gui_update = now
+                gui.try_capture(
+                    model, gt=gt_image,
+                    stats={"iter": it, "loss": loss.item(), "psnr": psnr, "elapsed": now - start},
+                    changed=True
+                )
+
+            if it % 100 == 0:
                 chol = model.cholesky
                 splat_sizes = torch.sqrt((chol[:, 0] * chol[:, 2]))  # sqrt(L11 * L22) ~ geom mean of axes
                 p1, p50, p99 = torch.quantile(splat_sizes, torch.tensor([0.01, 0.5, 0.99], device=device))
@@ -259,6 +284,15 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
         transforms.ToPILImage()(render_native.permute(2, 0, 1)).save(f"result_native_{n_suffix}.png")
         if use_upscale:
             transforms.ToPILImage()(render_upscaled.permute(2, 0, 1)).save(f"result_upscaled_{n_suffix}.png")
+    
+    # Post-training visualization loop
+    print("Training complete. Close GUI window to exit.")
+    while gui_thread.is_alive():
+        if gui.gui_ready.is_set():
+            gui.try_capture(
+                model, gt=gt_image,
+                stats={"iter": iterations, "psnr": psnr, "loss": 0.0})
+        time.sleep(0.05)
 
 
 if __name__ == "__main__":
