@@ -4,7 +4,8 @@ from utils import *
 import torch
 import torch.nn as nn
 import math
-from optimizer import Adan
+# from optimizer import Adan
+from adan import Adan
 
 class LIG(nn.Module):
     def __init__(self, loss_type="L2", **kwargs):
