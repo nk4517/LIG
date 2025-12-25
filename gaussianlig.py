@@ -1,7 +1,5 @@
 import sys
 
-from LIG.utils import _covariance_penalty
-
 sys.path.insert(0, '../splatting_app/gsplat-2025/examples')
 from lib_dog import fast_dog
 from gsplat2d.project_gaussians_cholesky import project_gaussians_cholesky
@@ -224,8 +222,6 @@ class Gaussian2D(nn.Module):
         else:
             loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
         
-        covariance_penalty = _covariance_penalty(self.cholesky)
-        loss += 0.01 * covariance_penalty
         loss.backward()
         with torch.no_grad():
             mse_loss = F.mse_loss(image, gt_image)
