@@ -15,8 +15,8 @@ try:
 except ImportError:
     CUDA_AVAILABLE = False
 
-from .cmap_batlow import batlow as BATLOW_CMAP
-from .common import VisMode, GradientMode, ShaderBinding
+from LIG.gui.cmap_batlow import batlow as BATLOW_CMAP
+from LIG.gui.common import VisMode, GradientMode, ShaderBinding, cv2_to_gl_rgba
 
 
 @dataclass
