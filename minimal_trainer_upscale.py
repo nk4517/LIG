@@ -35,6 +35,8 @@ from gsplat2d.rasterize import rasterize_gaussians
 from gsplat2d.project_gaussians_cholesky import project_gaussians_cholesky
 from gsplat2d.upscale import gradient_aware_upscale
 from upscaler_torch import torch_gradient_aware_upscale
+from utils import _covariance_penalty
+
 
 
 # ============ CONFIG ============
@@ -244,6 +246,8 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
         compare_img = out["render_hwc"] if not use_upscale else upscale_fn(out, H_gt, W_gt, use_torch_upscale)
         loss = F.mse_loss(compare_img, gt_hwc)
 
+        covariance_penalty = _covariance_penalty(model.cholesky)
+        loss += 0.01 * covariance_penalty
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()

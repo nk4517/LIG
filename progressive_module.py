@@ -5,6 +5,7 @@ from utils import *
 import torch
 import torch.nn as nn
 
+from LIG.utils import loss_fn, _covariance_penalty
 from gsplat2d import project_gaussians_cholesky, rasterize_gaussians
 
 
@@ -224,6 +225,8 @@ class ProgressiveGaussian2D(nn.Module):
         # Штраф за пиксели вне [0, 1] (weighted sum может выходить за диапазон)
         # clamp_penalty = (F.relu(-image) + F.relu(image - 1)).mean()
         # loss = loss + 0.1 * clamp_penalty
+        covariance_penalty = _covariance_penalty(self.cholesky)
+        loss = loss + 0.01 * covariance_penalty
         loss.backward()
         with torch.no_grad():
             mse_loss = F.mse_loss(image, gt_image)
