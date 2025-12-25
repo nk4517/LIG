@@ -136,6 +136,28 @@ class Gaussian2DMinimal(nn.Module):
             "render_hwc": out_img, "wsum": out_wsum, "dx": dx, "dy": dy, "dxy": dxy,
         }
 
+    def scale_to(self, new_H: int, new_W: int):
+        """Scale parameters to new resolution"""
+        scale_x = new_W / self.W
+        scale_y = new_H / self.H
+
+        with torch.no_grad():
+            self.means.data[:, 0] *= scale_x
+            self.means.data[:, 1] *= scale_y
+
+            # L11, L22: softplus -> scale -> inverse softplus
+            L11 = F.softplus(self._cholesky.data[:, 0])
+            L22 = F.softplus(self._cholesky.data[:, 2])
+            L11_new = L11 * scale_x
+            L22_new = L22 * scale_y
+            self._cholesky.data[:, 0] = torch.log(torch.clamp(torch.exp(L11_new) - 1, min=1e-8))
+            self._cholesky.data[:, 2] = torch.log(torch.clamp(torch.exp(L22_new) - 1, min=1e-8))
+            # L21: no softplus, just scale
+            self._cholesky.data[:, 1] *= scale_y
+
+        self.H = new_H
+        self.W = new_W
+
 
 def upscale_fn(out, target_h, target_w, use_torch_upscale):
     render_hwc = out["render_hwc"]
