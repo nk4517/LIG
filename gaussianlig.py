@@ -32,7 +32,8 @@ class LIG(nn.Module):
                 for i in range(s):
                     num_points -= int(kwargs["num_points"] * pow(2.0, (-self.n_scales + i + 1)*2) * self.allo_ratio)
 
-            self.level_models.append(Gaussian2D(loss_type="L2", opt_type=kwargs['opt_type'], num_points=num_points, 
+            self.level_models.append(Gaussian2D(loss_type=self.loss_type, opt_type=kwargs['opt_type'],
+                                                   num_points=num_points,
                                                    H=H, W=W, BLOCK_H=kwargs['BLOCK_H'], BLOCK_W=kwargs['BLOCK_W'],
                                                    device=kwargs['device'], lr=kwargs['lr']))
 
