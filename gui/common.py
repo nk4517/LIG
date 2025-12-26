@@ -14,6 +14,8 @@ class VisMode(IntEnum):
     WSUM = 5
     UPSCALED_TORCH = 6
     UPSCALED_CUDA = 7
+    EAC_SPHERE = 8
+    EQUIRECT_SPHERE = 9
 
 
 class GradientMode(IntEnum):
