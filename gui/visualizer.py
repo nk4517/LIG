@@ -324,6 +324,15 @@ class VisualizerGUI:
                 gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, filt)
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
 
+    def load_image_to_slot(self, image_path: str, slot_name: str):
+        """Load image from file and upload to specified texture slot"""
+        import cv2
+        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(f"Failed to load image: {image_path}")
+        tensor = cv2_to_gl_rgba(img)
+        upload_to_slot(tensor, self.textures[slot_name], self.use_cuda)
+
     def window_close_callback(self, window):
         pass
 
@@ -346,7 +355,6 @@ class VisualizerGUI:
             dx = xpos - self.last_mouse_x
             dy = ypos - self.last_mouse_y
             self.fit_to_window = False
-
             # Pan хранится в пикселях окна
             self.pan_x -= dx
             self.pan_y -= dy
