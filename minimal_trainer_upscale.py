@@ -40,20 +40,23 @@ from upscaler_torch import torch_gradient_aware_upscale
 # ============ CONFIG ============
 # IMAGE_PATH = r"x:\_ai\_gsplat\datasets\DIV2K_valid_HR\0900.png"
 # IMAGE_PATH = r"X:\_ai\_gsplat\datasets\sports-car-futuristic-mountain-sunset-scenery-digital-art-4k-wallpaper-uhdpaper.com-537@0@i.jpg"
-IMAGE_PATH = r"X:\_ai\_gsplat\datasets\full-moon-japanese-tree-night-sky-scenery-4k-wallpaper-uhdpaper.com-155@3@a.jpg"
+# IMAGE_PATH = r"X:\_ai\_gsplat\datasets\full-moon-japanese-tree-night-sky-scenery-4k-wallpaper-uhdpaper.com-155@3@a.jpg"
+# IMAGE_PATH = r"X:\_ai\_gsplat\datasets\erawan-falls-waterfall-forest-spring-rainforest-thailand-5120x3413-1293.jpg"
+IMAGE_PATH = r"X:\_ai\_gsplat\datasets\busan-gwangan-bridge-city-lights-sunset-harbor-red-sky-6144x4096-1355.jpg"
 # IMAGE_PATH = r"x:\_ai\_gsplat\datasets\GF2_PMS1__L1A0001491417-MSS1.tif"
 # IMAGE_PATH = r"X:\_ai\_gsplat\datasets\175468-seealpsee-gora-oblako-rastenie-zelenyj-7680x4320.jpg"
 # IMAGE_PATH = r"X:\_ai\_gsplat\datasets\175715-nacionalnyj_park_glejsher-ozero_tu_medisin-lavina_ozero-gora_rejnoldsa-ozero_makdonald-7680x4320.jpg"
 # IMAGE_PATH = r"x:\_ai\_gsplat\datasets\STimage\Human_Heart_6.png"
 # IMAGE_PATH = r"x:\_ai\_gsplat\datasets\328220.jpg"
+# IMAGE_PATH = r"X:\_ai\_gsplat\datasets\aether-lumine-6921x3894-19456.jpg"
 # IMAGE_PATH = r"L:\WIN_DOWNLOADS\full-moon-forest-night-dark-starry-sky-5k-8k-7952x5304-1684.jpg"
 # IMAGE_PATH = r"L:\WIN_DOWNLOADS\Siemens_Star,_3840x2160_pixels,_628_Stripes.png"
-NUM_POINTS = 2_500_000
+NUM_POINTS = 3_500_000
 ITERATIONS = 10000
 LR = 0.015
 USE_UPSCALE = True
 USE_TORCH_UPSCALE = False  # True = torch impl, False = gsplat2d CUDA impl
-MODEL_RESOLUTION = 1920  # train at this max dimension, upscale to full
+MODEL_RESOLUTION = 1/2  # train at this max dimension, upscale to full
 MAX_TRAIN_RESOLUTION = None # if set, downscale gt to fit this max dimension before training
 DEVICE = torch.device("cuda:0")
 # ================================
@@ -202,7 +205,10 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
             gt_image = F.interpolate(gt_image, size=(H_gt, W_gt), mode='area')
 
     if use_upscale:
-        scale = model_resolution / max(H_gt, W_gt)
+        if model_resolution < 1:
+            scale = model_resolution
+        else:
+            scale = model_resolution / max(H_gt, W_gt)
         H_model = round(H_gt * scale)
         W_model = round(W_gt * scale)
     else:
