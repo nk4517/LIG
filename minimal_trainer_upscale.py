@@ -53,7 +53,7 @@ ITERATIONS = 10000
 LR = 0.015
 USE_UPSCALE = True
 USE_TORCH_UPSCALE = False  # True = torch impl, False = gsplat2d CUDA impl
-MODEL_RESOLUTION = 1920  # train at this max dimension, upscale to full
+MODEL_RESOLUTION = 1/2  # train at this max dimension, upscale to full
 MAX_TRAIN_RESOLUTION = None # if set, downscale gt to fit this max dimension before training
 DEVICE = torch.device("cuda:0")
 # ================================
@@ -202,7 +202,10 @@ def train(image_path: str, num_points: int, iterations: int, lr: float,
             gt_image = F.interpolate(gt_image, size=(H_gt, W_gt), mode='area')
 
     if use_upscale:
-        scale = model_resolution / max(H_gt, W_gt)
+        if model_resolution < 1:
+            scale = model_resolution
+        else:
+            scale = model_resolution / max(H_gt, W_gt)
         H_model = round(H_gt * scale)
         W_model = round(W_gt * scale)
     else:
