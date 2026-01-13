@@ -93,3 +93,22 @@ __global__ void gradient_aware_rasterize_forward(
     float3* __restrict__ out_dy,
     float3* __restrict__ out_dxy
 );
+
+// compute output color image from binned and sorted gaussians
+template<bool WITH_UPSCALE_GRADS>
+__global__ void rasterize_forward_unified(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ colors,
+    const float* __restrict__ opacities,  // optional, can be nullptr
+    int* __restrict__ final_index,
+    float3* __restrict__ out_img,
+    float* __restrict__ out_wsum,
+    float3* __restrict__ out_dx,
+    float3* __restrict__ out_dy,
+    float3* __restrict__ out_dxy
+);

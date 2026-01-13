@@ -365,3 +365,220 @@ __global__ void project_gaussians_backward_kernel_cholesky(
  * Total for each conic component combines all four gradient paths.
  */
 
+
+template<bool WITH_UPSCALE_GRADS>
+__global__ void rasterize_backward_kernel_unified(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ rgbs,
+    const float* __restrict__ opacities,
+    const int* __restrict__ final_index,
+    const float3* __restrict__ v_output,
+    const float* __restrict__ v_render_wsum,
+    const float3* __restrict__ v_output_dx,
+    const float3* __restrict__ v_output_dy,
+    const float3* __restrict__ v_output_dxy,
+    float2* __restrict__ v_xy,
+    float2* __restrict__ v_xy_abs,
+    float3* __restrict__ v_conic,
+    float3* __restrict__ v_rgb,
+    float* __restrict__ v_opacity
+) {
+    auto block = cg::this_thread_block();
+    int32_t tile_id =
+        block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i =
+        block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j =
+        block.group_index().x * block.group_dim().x + block.thread_index().x;
+
+    const float px = (float)j + 0.5;
+    const float py = (float)i + 0.5;
+    const int32_t pix_id = min(i * img_size.x + j, img_size.x * img_size.y - 1);
+
+    const bool inside = (i < img_size.y && j < img_size.x);
+    const int bin_final = inside ? final_index[pix_id] : 0;
+
+    const int2 range = tile_bins[tile_id];
+    const int block_size = block.size();
+    const int num_batches = (range.y - range.x + block_size - 1) / block_size;
+
+    __shared__ int32_t id_batch[MAX_BLOCK_SIZE];
+    __shared__ float2 xy_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 rgbs_batch[MAX_BLOCK_SIZE];
+    __shared__ float opacity_batch[MAX_BLOCK_SIZE];
+
+    const float3 v_out = v_output[pix_id];
+    const float v_render_w = v_render_wsum[pix_id];
+
+    float3 v_dx, v_dy, v_dxy;
+    if constexpr (WITH_UPSCALE_GRADS) {
+        v_dx = v_output_dx[pix_id];
+        v_dy = v_output_dy[pix_id];
+        v_dxy = v_output_dxy[pix_id];
+    }
+
+    const int tr = block.thread_rank();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+    const int warp_bin_final = cg::reduce(warp, bin_final, cg::greater<int>());
+
+    for (int b = 0; b < num_batches; ++b) {
+        block.sync();
+
+        const int batch_end = range.y - 1 - block_size * b;
+        int batch_size = min(block_size, batch_end + 1 - range.x);
+        const int idx = batch_end - tr;
+        if (idx >= range.x) {
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            xy_batch[tr] = xys[g_id];
+            conic_batch[tr] = conics[g_id];
+            rgbs_batch[tr] = rgbs[g_id];
+            opacity_batch[tr] = opacities ? opacities[g_id] : 1.0f;
+        }
+        block.sync();
+
+        for (int t = max(0, batch_end - warp_bin_final); t < batch_size; ++t) {
+            int valid = inside;
+            if (batch_end - t > bin_final) {
+                valid = 0;
+            }
+            float alpha;
+            float2 delta;
+            float3 conic;
+            float vis;
+            float sigma_x = 0.f, sigma_y = 0.f;
+            if (valid) {
+                conic = conic_batch[t];
+                const float opacity = opacity_batch[t];
+                float2 xy = xy_batch[t];
+                delta = {px - xy.x, py - xy.y};
+                float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                      conic.z * delta.y * delta.y) +
+                              conic.y * delta.x * delta.y;
+                vis = __expf(-sigma);
+                alpha = min(0.999f, opacity * vis);
+                if (sigma < 0.f || alpha < 1.f / 255.f) {
+                    valid = 0;
+                } else if constexpr (WITH_UPSCALE_GRADS) {
+                    sigma_x = conic.x * delta.x + conic.y * delta.y;
+                    sigma_y = conic.y * delta.x + conic.z * delta.y;
+                }
+            }
+            if (!warp.any(valid)) {
+                continue;
+            }
+            float3 v_rgb_local = {0.f, 0.f, 0.f};
+            float3 v_conic_local = {0.f, 0.f, 0.f};
+            float2 v_xy_local = {0.f, 0.f};
+            float2 v_xy_abs_local = {0.f, 0.f};
+            float v_opacity_local = 0.f;
+
+            if (valid) {
+                const float3 c = rgbs_batch[t];
+                float v_alpha = dot(c, v_out) + v_render_w;
+
+                if constexpr (WITH_UPSCALE_GRADS) {
+                    // ================================================================
+                    // GRADIENT W.R.T. COLOR
+                    // ∂L/∂c = v_I * α + v_dx * α_x + v_dy * α_y + v_dxy * α_xy
+                    // ================================================================
+                    const float c_a = conic.x, c_b = conic.y, c_c = conic.z;
+                    const float sx = sigma_x, sy = sigma_y;
+                    const float alpha_x = -alpha * sx;
+                    const float alpha_y = -alpha * sy;
+                    const float alpha_xy = alpha * (sx * sy - c_b);
+
+                    v_rgb_local = v_out * alpha + v_dx * alpha_x + v_dy * alpha_y + v_dxy * alpha_xy;
+
+                    // ================================================================
+                    // VIRTUAL GRADIENTS (intermediate gradients on α and its derivatives)
+                    // ================================================================
+                    const float v_alpha_x = dot(v_dx, c);
+                    const float v_alpha_y = dot(v_dy, c);
+                    const float v_alpha_xy = dot(v_dxy, c);
+
+                    // ================================================================
+                    // GRADIENT W.R.T. POSITION μ
+                    // Note: d = pixel - μ, so gradients w.r.t. μ have opposite sign
+                    // ================================================================
+                    const float sx2 = sx * sx, sy2 = sy * sy, sxsy = sx * sy;
+
+                    // ================================================================
+                    // GRADIENT W.R.T. CONIC {a, b, c}
+                    // ================================================================
+                    const float dx = delta.x, dy = delta.y;
+                    const float dx2 = dx * dx, dy2 = dy * dy, dxdy = dx * dy;
+                    const float P = sxsy - c_b;
+
+                    v_xy_local.x = alpha * (v_alpha * sx + v_alpha_x * (c_a - sx2) + v_alpha_y * (c_b - sxsy) + v_alpha_xy * (sx2 * sy - 2.f * c_b * sx - c_a * sy));
+                    v_xy_local.y = alpha * (v_alpha * sy + v_alpha_x * (c_b - sxsy) + v_alpha_y * (c_c - sy2) + v_alpha_xy * (sx * sy2 - 2.f * c_b * sy - c_c * sx));
+
+                    v_conic_local.x = alpha * (v_alpha * (-0.5f * dx2) + v_alpha_x * (0.5f * dx2 * sx - dx) + v_alpha_y * (0.5f * dx2 * sy) + v_alpha_xy * (-0.5f * dx2 * P + dx * sy));
+                    v_conic_local.y = alpha * (v_alpha * (-dxdy) + v_alpha_x * (dxdy * sx - dy) + v_alpha_y * (dxdy * sy - dx) + v_alpha_xy * (-dxdy * P + dy * sy + dx * sx - 1.f));
+                    v_conic_local.z = alpha * (v_alpha * (-0.5f * dy2) + v_alpha_x * (0.5f * dy2 * sx) + v_alpha_y * (0.5f * dy2 * sy - dy) + v_alpha_xy * (-0.5f * dy2 * P + dy * sx));
+                } else {
+                    v_rgb_local = v_out * alpha;
+                    // ∂α/∂σ = -α (since α = opacity * exp(-σ))
+                    const float v_sigma = -alpha * v_alpha;
+                    // ∂σ/∂conic: σ = 0.5*(a*dx² + c*dy²) + b*dx*dy
+                    v_conic_local = {0.5f * v_sigma * delta.x * delta.x,
+                                     v_sigma * delta.x * delta.y,
+                                     0.5f * v_sigma * delta.y * delta.y};
+                    // ∂σ/∂xy: chain rule through delta
+                    v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y),
+                                  v_sigma * (conic.y * delta.x + conic.z * delta.y)};
+                }
+                // ∂α/∂opacity = vis (gaussian weight before opacity scaling)
+                v_opacity_local = vis * v_alpha;
+                v_xy_abs_local = {fabsf(v_xy_local.x), fabsf(v_xy_local.y)};
+            }
+            warpSum3(v_rgb_local, warp);
+            warpSum3(v_conic_local, warp);
+            warpSum2(v_xy_local, warp);
+            warpSum2(v_xy_abs_local, warp);
+            warpSum(v_opacity_local, warp);
+            if (warp.thread_rank() == 0) {
+                int32_t g = id_batch[t];
+                float* v_rgb_ptr = (float*)(v_rgb);
+                atomicAdd(v_rgb_ptr + 3*g + 0, v_rgb_local.x);
+                atomicAdd(v_rgb_ptr + 3*g + 1, v_rgb_local.y);
+                atomicAdd(v_rgb_ptr + 3*g + 2, v_rgb_local.z);
+
+                float* v_conic_ptr = (float*)(v_conic);
+                atomicAdd(v_conic_ptr + 3*g + 0, v_conic_local.x);
+                atomicAdd(v_conic_ptr + 3*g + 1, v_conic_local.y);
+                atomicAdd(v_conic_ptr + 3*g + 2, v_conic_local.z);
+
+                float* v_xy_ptr = (float*)(v_xy);
+                atomicAdd(v_xy_ptr + 2*g + 0, v_xy_local.x);
+                atomicAdd(v_xy_ptr + 2*g + 1, v_xy_local.y);
+
+                float* v_xy_abs_ptr = (float*)(v_xy_abs);
+                atomicAdd(v_xy_abs_ptr + 2*g + 0, v_xy_abs_local.x);
+                atomicAdd(v_xy_abs_ptr + 2*g + 1, v_xy_abs_local.y);
+
+                if (v_opacity) {
+                    atomicAdd(v_opacity + g, v_opacity_local);
+                }
+            }
+        }
+    }
+}
+
+template __global__ void rasterize_backward_kernel_unified<false>(
+    const dim3, const dim3, const int32_t* __restrict__, const int2* __restrict__, const float2* __restrict__,
+    const float3* __restrict__, const float3* __restrict__, const float* __restrict__, const int* __restrict__, const float3* __restrict__,
+    const float* __restrict__, const float3* __restrict__, const float3* __restrict__, const float3* __restrict__,
+    float2* __restrict__, float2* __restrict__, float3* __restrict__, float3* __restrict__, float* __restrict__);
+
+template __global__ void rasterize_backward_kernel_unified<true>(
+    const dim3, const dim3, const int32_t* __restrict__, const int2* __restrict__, const float2* __restrict__,
+    const float3* __restrict__, const float3* __restrict__, const float* __restrict__, const int* __restrict__, const float3* __restrict__,
+    const float* __restrict__, const float3* __restrict__, const float3* __restrict__, const float3* __restrict__,
+    float2* __restrict__, float2* __restrict__, float3* __restrict__, float3* __restrict__, float* __restrict__);

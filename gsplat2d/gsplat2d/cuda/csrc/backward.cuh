@@ -67,3 +67,26 @@ __global__ void project_gaussians_backward_kernel_cholesky(
     float3* __restrict__ v_cholesky,
     float2* __restrict__ v_mean2d
 );
+
+template<bool WITH_UPSCALE_GRADS>
+__global__ void rasterize_backward_kernel_unified(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ rgbs,
+    const float* __restrict__ opacities,
+    const int* __restrict__ final_index,
+    const float3* __restrict__ v_output,
+    const float* __restrict__ v_render_wsum,
+    const float3* __restrict__ v_output_dx,
+    const float3* __restrict__ v_output_dy,
+    const float3* __restrict__ v_output_dxy,
+    float2* __restrict__ v_xy,
+    float2* __restrict__ v_xy_abs,
+    float3* __restrict__ v_conic,
+    float3* __restrict__ v_rgb,
+    float* __restrict__ v_opacity
+);

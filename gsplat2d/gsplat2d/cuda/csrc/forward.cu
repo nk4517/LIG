@@ -277,3 +277,151 @@ __global__ void rasterize_forward(
         out_wsum[pix_id] = pix_wsum;
     }
 }
+
+template<bool WITH_UPSCALE_GRADS>
+__global__ void rasterize_forward_unified(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ colors,
+    const float* __restrict__ opacities,
+    int* __restrict__ final_index,
+    float3* __restrict__ out_img,
+    float* __restrict__ out_wsum,
+    float3* __restrict__ out_dx,
+    float3* __restrict__ out_dy,
+    float3* __restrict__ out_dxy
+) {
+    auto block = cg::this_thread_block();
+    int32_t tile_id =
+        block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i =
+        block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j =
+        block.group_index().x * block.group_dim().x + block.thread_index().x;
+
+    float px = (float)j + 0.5;
+    float py = (float)i + 0.5;
+    int32_t pix_id = i * img_size.x + j;
+
+    bool inside = (i < img_size.y && j < img_size.x);
+    bool done = !inside;
+    // keep not rasterizing threads around for reading data
+
+    // which gaussians to look through in this tile
+    int2 range = tile_bins[tile_id];
+    const int block_size = block.size();
+    int num_batches = (range.y - range.x + block_size - 1) / block_size;
+
+    __shared__ int32_t id_batch[MAX_BLOCK_SIZE];
+    __shared__ float2 xy_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
+    __shared__ float opacity_batch[MAX_BLOCK_SIZE];
+
+    int cur_idx = 0;
+    int tr = block.thread_rank();
+    float3 pix_out = {0.f, 0.f, 0.f};
+    float pix_wsum = 0.f;
+    float3 pix_dx = {0.f, 0.f, 0.f};
+    float3 pix_dy = {0.f, 0.f, 0.f};
+    float3 pix_dxy = {0.f, 0.f, 0.f};
+
+    // each thread loads one gaussian at a time before rasterizing its designated pixel
+    for (int b = 0; b < num_batches; ++b) {
+        if (__syncthreads_count(done) >= block_size) {
+            break;  // end early if entire tile is done
+        }
+
+        int batch_start = range.x + block_size * b;
+        int idx = batch_start + tr;
+        if (idx < range.y) {
+            // each thread fetch 1 gaussian from front to back
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            xy_batch[tr] = xys[g_id];
+            conic_batch[tr] = conics[g_id];
+            opacity_batch[tr] = opacities ? opacities[g_id] : 1.0f;
+        }
+
+        // wait for other threads to collect the gaussians in batch
+        block.sync();
+
+        // process gaussians in the current batch for this pixel
+        int batch_size = min(block_size, range.y - batch_start);
+        for (int t = 0; (t < batch_size) && !done; ++t) {
+            const float3 conic = conic_batch[t];
+            const float2 xy = xy_batch[t];
+            // d = [x - μ_x, y - μ_y] (Eq. 38)
+            const float2 delta = {px - xy.x, py - xy.y};
+            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                        conic.z * delta.y * delta.y) +
+                                conic.y * delta.x * delta.y;
+            const float opacity = opacity_batch[t];
+            const float alpha = min(0.999f, opacity * __expf(-sigma));
+            if (sigma < 0.f || alpha < 1.f / 255.f) {
+                continue;
+            }
+
+            int32_t g = id_batch[t];
+            const float3 c = colors[g];
+            pix_out += c * alpha;
+            pix_wsum += alpha;
+
+            if constexpr (WITH_UPSCALE_GRADS) {
+                // First-order partial derivatives of sigma = -g (Eq. 37: g = -d^T * Σ^{-1} * d)
+                // sigma = 0.5 * d^T * conic * d, where conic = Σ^{-1}
+                // ∂sigma/∂x = conic.x * d.x + conic.y * d.y
+                // ∂sigma/∂y = conic.y * d.x + conic.z * d.y
+                const float d_sigma_dx = conic.x * delta.x + conic.y * delta.y;
+                const float d_sigma_dy = conic.y * delta.x + conic.z * delta.y;
+
+                // ∂²sigma/∂x∂y = conic.y (the off-diagonal element of the conic matrix)
+                const float d2_sigma_dxdy = conic.y;
+
+                // α = exp(-sigma) (Eq. 36), ∂α/∂x = -α * ∂sigma/∂x
+                const float d_alpha_dx = -alpha * d_sigma_dx;
+                const float d_alpha_dy = -alpha * d_sigma_dy;
+
+                // ∂²α/∂x∂y = -α * (∂²sigma/∂x∂y - ∂sigma/∂x * ∂sigma/∂y)
+                const float d2_alpha_dxdy = -alpha * (d2_sigma_dxdy - d_sigma_dx * d_sigma_dy);
+
+                // Accumulate gradients for weighted summation (simplified from Eqs. 46-49)
+                // For weighted sum: I(x,y) = Σ c_i * α_i(x,y)
+                // ∂I/∂x = Σ c_i * ∂α_i/∂x (no alpha-compositing terms)
+                pix_dx += c * d_alpha_dx;
+                // ∂I/∂y = Σ c_i * ∂α_i/∂y
+                pix_dy += c * d_alpha_dy;
+                // ∂²I/∂x∂y = Σ c_i * ∂²α_i/∂x∂y
+                pix_dxy += c * d2_alpha_dxdy;
+            }
+
+            cur_idx = batch_start + t;
+        }
+    }
+
+    if (inside) {
+        final_index[pix_id] = cur_idx;
+        out_img[pix_id] = pix_out;
+        out_wsum[pix_id] = pix_wsum;
+        if constexpr (WITH_UPSCALE_GRADS) {
+            out_dx[pix_id] = pix_dx;
+            out_dy[pix_id] = pix_dy;
+            out_dxy[pix_id] = pix_dxy;
+        }
+    }
+}
+
+template __global__ void rasterize_forward_unified<false>(
+    const dim3, const dim3, const int32_t* __restrict__, const int2* __restrict__,
+    const float2* __restrict__, const float3* __restrict__, const float3* __restrict__,
+    const float* __restrict__, int* __restrict__, float3* __restrict__,
+    float* __restrict__, float3* __restrict__, float3* __restrict__, float3* __restrict__);
+
+template __global__ void rasterize_forward_unified<true>(
+    const dim3, const dim3, const int32_t* __restrict__, const int2* __restrict__,
+    const float2* __restrict__, const float3* __restrict__, const float3* __restrict__,
+    const float* __restrict__, int* __restrict__, float3* __restrict__,
+    float* __restrict__, float3* __restrict__, float3* __restrict__, float3* __restrict__);
