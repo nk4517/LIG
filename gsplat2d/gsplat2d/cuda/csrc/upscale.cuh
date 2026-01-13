@@ -4,6 +4,9 @@
 #include <cstdint>
 #include "floatN.cuh"
 
+// true = src-centric (no atomics), false = dst-centric (with atomics)
+constexpr bool USE_SRC_CENTRIC_UPSCALE_BACKWARD = true;
+
 template<typename T>
 __global__ void gradient_aware_upscale_kernel(
     const int dst_h,

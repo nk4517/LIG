@@ -246,6 +246,82 @@ __global__ void gradient_aware_upscale_kernel(
     output[dst_y * dst_w + dst_x] = result;
 }
 
+template __global__ void gradient_aware_upscale_kernel<float>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float* __restrict__ render,
+    const float* __restrict__ dx,
+    const float* __restrict__ dy,
+    const float* __restrict__ dxy,
+    float* __restrict__ output);
+
+template __global__ void gradient_aware_upscale_kernel<float2>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float2* __restrict__ render,
+    const float2* __restrict__ dx,
+    const float2* __restrict__ dy,
+    const float2* __restrict__ dxy,
+    float2* __restrict__ output);
+
+template __global__ void gradient_aware_upscale_kernel<float3>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float3* __restrict__ render,
+    const float3* __restrict__ dx,
+    const float3* __restrict__ dy,
+    const float3* __restrict__ dxy,
+    float3* __restrict__ output);
+
+template __global__ void gradient_aware_upscale_kernel<float4>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float4* __restrict__ render,
+    const float4* __restrict__ dx,
+    const float4* __restrict__ dy,
+    const float4* __restrict__ dxy,
+    float4* __restrict__ output);
+
+template __global__ void gradient_aware_upscale_kernel<float5>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float5* __restrict__ render,
+    const float5* __restrict__ dx,
+    const float5* __restrict__ dy,
+    const float5* __restrict__ dxy,
+    float5* __restrict__ output);
+
+
 template<typename T>
 __global__ void gradient_aware_upscale_backward_kernel(
     const int dst_h,
@@ -329,6 +405,81 @@ __global__ void gradient_aware_upscale_backward_kernel(
     atomic_add_scaled(grad_dxy, idx10, g, cx[2] * cy[3]);
     atomic_add_scaled(grad_dxy, idx11, g, cx[3] * cy[3]);
 }
+
+template __global__ void gradient_aware_upscale_backward_kernel<float>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float* __restrict__ grad_output,
+    float* __restrict__ grad_render,
+    float* __restrict__ grad_dx,
+    float* __restrict__ grad_dy,
+    float* __restrict__ grad_dxy);
+
+template __global__ void gradient_aware_upscale_backward_kernel<float2>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float2* __restrict__ grad_output,
+    float2* __restrict__ grad_render,
+    float2* __restrict__ grad_dx,
+    float2* __restrict__ grad_dy,
+    float2* __restrict__ grad_dxy);
+
+template __global__ void gradient_aware_upscale_backward_kernel<float3>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float3* __restrict__ grad_output,
+    float3* __restrict__ grad_render,
+    float3* __restrict__ grad_dx,
+    float3* __restrict__ grad_dy,
+    float3* __restrict__ grad_dxy);
+
+template __global__ void gradient_aware_upscale_backward_kernel<float4>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float4* __restrict__ grad_output,
+    float4* __restrict__ grad_render,
+    float4* __restrict__ grad_dx,
+    float4* __restrict__ grad_dy,
+    float4* __restrict__ grad_dxy);
+
+template __global__ void gradient_aware_upscale_backward_kernel<float5>(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const float5* __restrict__ grad_output,
+    float5* __restrict__ grad_render,
+    float5* __restrict__ grad_dx,
+    float5* __restrict__ grad_dy,
+    float5* __restrict__ grad_dxy);
 
 
 // Src-centric backward kernel: iterates over src pixels, no atomics needed
@@ -443,3 +594,37 @@ __global__ void gradient_aware_upscale_backward_src_centric_kernel(
     grad_dxy[src_idx] = acc_fxy;
 }
 
+template __global__ void gradient_aware_upscale_backward_src_centric_kernel<float>(
+    const int, const int, const int, const int,
+    const float, const float, const float, const float,
+    const float* __restrict__,
+    float* __restrict__, float* __restrict__,
+    float* __restrict__, float* __restrict__);
+
+template __global__ void gradient_aware_upscale_backward_src_centric_kernel<float2>(
+    const int, const int, const int, const int,
+    const float, const float, const float, const float,
+    const float2* __restrict__,
+    float2* __restrict__, float2* __restrict__,
+    float2* __restrict__, float2* __restrict__);
+
+template __global__ void gradient_aware_upscale_backward_src_centric_kernel<float3>(
+    const int, const int, const int, const int,
+    const float, const float, const float, const float,
+    const float3* __restrict__,
+    float3* __restrict__, float3* __restrict__,
+    float3* __restrict__, float3* __restrict__);
+
+template __global__ void gradient_aware_upscale_backward_src_centric_kernel<float4>(
+    const int, const int, const int, const int,
+    const float, const float, const float, const float,
+    const float4* __restrict__,
+    float4* __restrict__, float4* __restrict__,
+    float4* __restrict__, float4* __restrict__);
+
+template __global__ void gradient_aware_upscale_backward_src_centric_kernel<float5>(
+    const int, const int, const int, const int,
+    const float, const float, const float, const float,
+    const float5* __restrict__,
+    float5* __restrict__, float5* __restrict__,
+    float5* __restrict__, float5* __restrict__);

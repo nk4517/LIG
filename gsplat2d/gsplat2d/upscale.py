@@ -48,10 +48,10 @@ class _GradientAwareSplineUpscale(Function):
 
 
 def gradient_aware_upscale(
-    render: Tensor,  # [H, W, 3]
-    dx: Tensor,      # [H, W, 3]
-    dy: Tensor,      # [H, W, 3]
-    dxy: Tensor,     # [H, W, 3]
+    render: Tensor,  # [H, W, C]
+    dx: Tensor,      # [H, W, C]
+    dy: Tensor,      # [H, W, C]
+    dxy: Tensor,     # [H, W, C]
     dst_h: int,
     dst_w: int,
     roi: Optional[Tuple[float, float, float, float]] = None,  # (x1, y1, x2, y2)
@@ -60,16 +60,16 @@ def gradient_aware_upscale(
     Bicubic spline interpolation using analytical gradients.
     
     Args:
-        render: Rendered image [H, W, 3]
-        dx: Gradient w.r.t. x [H, W, 3]
-        dy: Gradient w.r.t. y [H, W, 3]
-        dxy: Mixed partial derivative [H, W, 3]
+        render: Rendered image [H, W, 5] (rgb, T, W)
+        dx: Gradient w.r.t. x [H, W, C]
+        dy: Gradient w.r.t. y [H, W, C]
+        dxy: Mixed partial derivative [H, W, C]
         dst_h: Output height
         dst_w: Output width
         roi: Region of interest (x1, y1, x2, y2), defaults to full image
     
     Returns:
-        Upscaled image [dst_h, dst_w, 3]
+        Upscaled image [dst_h, dst_w, C]
     """
     h, w, c = render.shape
     

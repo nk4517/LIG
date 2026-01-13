@@ -94,10 +94,14 @@ torch::Tensor get_tile_bin_edges_tensor(
 
 std::tuple<
     torch::Tensor, // output img
-    torch::Tensor, // output wsum
-    torch::Tensor, // output dx
-    torch::Tensor, // output dy
-    torch::Tensor, // output dxy
+    torch::Tensor, // output T - optional, empty if opacities not provided
+    torch::Tensor, // output img_dx
+    torch::Tensor, // output img_dy
+    torch::Tensor, // output img_dxy
+    torch::Tensor, // output T_dx
+    torch::Tensor, // output T_dy
+    torch::Tensor, // output T_dxy
+    torch::Tensor, // output S_xy_cross
     torch::Tensor // output final_idx
 > rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
@@ -109,7 +113,7 @@ std::tuple<
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const c10::optional<torch::Tensor> &opacities,
-    bool compute_upscale_gradients = true
+    unsigned extras = 0
 );
 
 std::
@@ -129,13 +133,21 @@ std::
         const torch::Tensor &xys,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
-        const torch::Tensor &final_idx,
-        const torch::Tensor &v_output,
-        const torch::Tensor &v_render_wsum,
         const c10::optional<torch::Tensor> &opacities,
+        const torch::Tensor &final_idx,
+        const c10::optional<torch::Tensor> &out_T,
+        const c10::optional<torch::Tensor> &out_T_dx,
+        const c10::optional<torch::Tensor> &out_T_dy,
+        const c10::optional<torch::Tensor> &out_T_dxy,
+        const c10::optional<torch::Tensor> &out_S_xy_cross,
+        const torch::Tensor &v_output,
+        const c10::optional<torch::Tensor> &v_T,
         const c10::optional<torch::Tensor> &v_output_dx,
         const c10::optional<torch::Tensor> &v_output_dy,
-        const c10::optional<torch::Tensor> &v_output_dxy
+        const c10::optional<torch::Tensor> &v_output_dxy,
+        const c10::optional<torch::Tensor> &v_T_dx,
+        const c10::optional<torch::Tensor> &v_T_dy,
+        const c10::optional<torch::Tensor> &v_T_dxy
     );
 torch::Tensor gradient_aware_upscale_forward_tensor(
     const torch::Tensor &render,    // [H, W, 3]

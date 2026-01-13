@@ -300,7 +300,7 @@ torch::Tensor get_tile_bin_edges_tensor(
     return tile_bins;
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
@@ -311,7 +311,7 @@ rasterize_forward_tensor(
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const c10::optional<torch::Tensor> &opacities,
-    bool compute_upscale_gradients
+    unsigned extras
 ) {
     DEVICE_GUARD(xys);
     CHECK_INPUT(gaussian_ids_sorted);
@@ -345,41 +345,68 @@ rasterize_forward_tensor(
     torch::Tensor out_img = torch::zeros(
         {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
     );
-    torch::Tensor out_wsum = torch::zeros(
-        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
-    );
+
+    bool compute_T = extras & RASTERIZE_EXTRAS_T;
+    bool compute_upscale_grads = extras & RASTERIZE_EXTRAS_UPSCALE_GRADS;
+    bool compute_T_upscale = compute_T && compute_upscale_grads;
+
+    torch::Tensor out_T;
+    if (compute_T) {
+        out_T = torch::zeros(
+            {img_height, img_width, 1}, xys.options().dtype(torch::kFloat32)
+        );
+    }
     torch::Tensor final_idx = torch::zeros(
         {img_height, img_width}, xys.options().dtype(torch::kInt32)
     );
 
-    torch::Tensor out_dx, out_dy, out_dxy;
+    torch::Tensor out_img_dx, out_img_dy, out_img_dxy;
+    torch::Tensor out_T_dx, out_T_dy, out_T_dxy, out_S_xy_cross;
 
-    if (compute_upscale_gradients) {
-        out_dx = torch::zeros(
+    if (compute_upscale_grads) {
+        out_img_dx = torch::zeros(
             {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
         );
-        out_dy = torch::zeros(
+        out_img_dy = torch::zeros(
             {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
         );
-        out_dxy = torch::zeros(
+        out_img_dxy = torch::zeros(
             {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
         );
+        if (compute_T_upscale) {
+            out_T_dx = torch::zeros(
+                {img_height, img_width, 1}, xys.options().dtype(torch::kFloat32)
+            );
+            out_T_dy = torch::zeros(
+                {img_height, img_width, 1}, xys.options().dtype(torch::kFloat32)
+            );
+            out_T_dxy = torch::zeros(
+                {img_height, img_width, 1}, xys.options().dtype(torch::kFloat32)
+            );
+            out_S_xy_cross = torch::zeros(
+                {img_height, img_width, 1}, xys.options().dtype(torch::kFloat32)
+            );
+        }
 
         rasterize_forward_unified<true><<<tile_bounds_dim3, block_dim3>>>(
-            tile_bounds_dim3,
-            img_size_dim3,
-            gaussian_ids_sorted.contiguous().data_ptr<int32_t>(),
-            (int2 *)tile_bins.contiguous().data_ptr<int>(),
-            (float2 *)xys.contiguous().data_ptr<float>(),
-            (float3 *)conics.contiguous().data_ptr<float>(),
-            (float3 *)colors.contiguous().data_ptr<float>(),
+	        tile_bounds_dim3,
+	        img_size_dim3,
+	        gaussian_ids_sorted.contiguous().data_ptr<int32_t>(),
+	        (int2 *)tile_bins.contiguous().data_ptr<int>(),
+	        (float2 *)xys.contiguous().data_ptr<float>(),
+	        (float3 *)conics.contiguous().data_ptr<float>(),
+	        (float3 *)colors.contiguous().data_ptr<float>(),
             opacities.has_value() ? opacities.value().contiguous().data_ptr<float>() : nullptr,
-            final_idx.contiguous().data_ptr<int>(),
-            (float3 *)out_img.contiguous().data_ptr<float>(),
-            out_wsum.contiguous().data_ptr<float>(),
-            (float3 *)out_dx.contiguous().data_ptr<float>(),
-            (float3 *)out_dy.contiguous().data_ptr<float>(),
-            (float3 *)out_dxy.contiguous().data_ptr<float>()
+	        final_idx.contiguous().data_ptr<int>(),
+	        (float3 *)out_img.contiguous().data_ptr<float>(),
+            compute_T ? out_T.contiguous().data_ptr<float>() : nullptr,
+	        (float3 *)out_img_dx.contiguous().data_ptr<float>(),
+	        (float3 *)out_img_dy.contiguous().data_ptr<float>(),
+	        (float3 *)out_img_dxy.contiguous().data_ptr<float>(),
+	        compute_T_upscale ? out_T_dx.contiguous().data_ptr<float>() : nullptr,
+	        compute_T_upscale ? out_T_dy.contiguous().data_ptr<float>() : nullptr,
+	        compute_T_upscale ? out_T_dxy.contiguous().data_ptr<float>() : nullptr,
+	        compute_T_upscale ? out_S_xy_cross.contiguous().data_ptr<float>() : nullptr
         );
     } else {
         rasterize_forward_unified<false><<<tile_bounds_dim3, block_dim3>>>(
@@ -393,14 +420,18 @@ rasterize_forward_tensor(
             opacities.has_value() ? opacities.value().contiguous().data_ptr<float>() : nullptr,
             final_idx.contiguous().data_ptr<int>(),
             (float3 *)out_img.contiguous().data_ptr<float>(),
-            out_wsum.contiguous().data_ptr<float>(),
+            compute_T ? out_T.contiguous().data_ptr<float>() : nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
             nullptr,
             nullptr,
             nullptr
         );
     }
 
-    return std::make_tuple(out_img, out_wsum, out_dx, out_dy, out_dxy, final_idx);
+    return std::make_tuple(out_img, out_T, out_img_dx, out_img_dy, out_img_dxy, out_T_dx, out_T_dy, out_T_dxy, out_S_xy_cross, final_idx);
 }
 
 std::
@@ -420,13 +451,21 @@ std::
         const torch::Tensor &xys,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
-        const torch::Tensor &final_idx,
-        const torch::Tensor &v_output,
-        const torch::Tensor &v_render_wsum,
         const c10::optional<torch::Tensor> &opacities,
+        const torch::Tensor &final_idx,
+        const c10::optional<torch::Tensor> &out_T,
+        const c10::optional<torch::Tensor> &out_T_dx,
+        const c10::optional<torch::Tensor> &out_T_dy,
+        const c10::optional<torch::Tensor> &out_T_dxy,
+        const c10::optional<torch::Tensor> &out_S_xy_cross,
+        const torch::Tensor &v_output,
+        const c10::optional<torch::Tensor> &v_T,
         const c10::optional<torch::Tensor> &v_output_dx,
         const c10::optional<torch::Tensor> &v_output_dy,
-        const c10::optional<torch::Tensor> &v_output_dxy
+        const c10::optional<torch::Tensor> &v_output_dxy,
+        const c10::optional<torch::Tensor> &v_T_dx,
+        const c10::optional<torch::Tensor> &v_T_dy,
+        const c10::optional<torch::Tensor> &v_T_dxy
     ) {
     DEVICE_GUARD(xys);
     CHECK_INPUT(xys);
@@ -473,11 +512,19 @@ std::
             (float3 *)colors.contiguous().data_ptr<float>(),
             opacities.has_value() ? opacities.value().contiguous().data_ptr<float>() : nullptr,
             final_idx.contiguous().data_ptr<int>(),
+            out_T.has_value() ? out_T.value().contiguous().data_ptr<float>() : nullptr,
+            out_T_dx.has_value() ? out_T_dx.value().contiguous().data_ptr<float>() : nullptr,
+            out_T_dy.has_value() ? out_T_dy.value().contiguous().data_ptr<float>() : nullptr,
+            out_T_dxy.has_value() ? out_T_dxy.value().contiguous().data_ptr<float>() : nullptr,
+            out_S_xy_cross.has_value() ? out_S_xy_cross.value().contiguous().data_ptr<float>() : nullptr,
             (float3 *)v_output.contiguous().data_ptr<float>(),
-            v_render_wsum.contiguous().data_ptr<float>(),
+            v_T.has_value() ? v_T.value().contiguous().data_ptr<float>() : nullptr,
             (float3 *)v_output_dx.value().contiguous().data_ptr<float>(),
             (float3 *)v_output_dy.value().contiguous().data_ptr<float>(),
             (float3 *)v_output_dxy.value().contiguous().data_ptr<float>(),
+            v_T_dx.has_value() ? v_T_dx.value().contiguous().data_ptr<float>() : nullptr,
+            v_T_dy.has_value() ? v_T_dy.value().contiguous().data_ptr<float>() : nullptr,
+            v_T_dxy.has_value() ? v_T_dxy.value().contiguous().data_ptr<float>() : nullptr,
             (float2 *)v_xy.contiguous().data_ptr<float>(),
             (float2 *)v_xy_abs.contiguous().data_ptr<float>(),
             (float3 *)v_conic.contiguous().data_ptr<float>(),
@@ -495,8 +542,16 @@ std::
             (float3 *)colors.contiguous().data_ptr<float>(),
             opacities.has_value() ? opacities.value().contiguous().data_ptr<float>() : nullptr,
             final_idx.contiguous().data_ptr<int>(),
+            out_T.has_value() ? out_T.value().contiguous().data_ptr<float>() : nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
             (float3 *)v_output.contiguous().data_ptr<float>(),
-            v_render_wsum.contiguous().data_ptr<float>(),
+            v_T.has_value() ? v_T.value().contiguous().data_ptr<float>() : nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
             nullptr,
             nullptr,
             nullptr,
@@ -528,6 +583,7 @@ torch::Tensor gradient_aware_upscale_forward_tensor(
 
     const int src_h = render.size(0);
     const int src_w = render.size(1);
+    const int channels = render.size(2);
 
     const float roi_x1 = std::get<0>(roi);
     const float roi_y1 = std::get<1>(roi);
@@ -535,7 +591,7 @@ torch::Tensor gradient_aware_upscale_forward_tensor(
     const float roi_y2 = std::get<3>(roi);
 
     torch::Tensor output = torch::zeros(
-        {dst_h, dst_w, 3},
+        {dst_h, dst_w, channels},
         render.options().dtype(torch::kFloat32)
     );
 
@@ -545,21 +601,25 @@ torch::Tensor gradient_aware_upscale_forward_tensor(
         (dst_h + block.y - 1) / block.y
     );
 
-    gradient_aware_upscale_kernel<<<grid, block>>>(
-            dst_h,
-            dst_w,
-            src_h,
-            src_w,
-            roi_x1,
-            roi_y1,
-            roi_x2,
-            roi_y2,
-            (float3*)render.contiguous().data_ptr<float>(),
-            (float3*)dx.contiguous().data_ptr<float>(),
-            (float3*)dy.contiguous().data_ptr<float>(),
-            (float3*)dxy.contiguous().data_ptr<float>(),
-            (float3*)output.data_ptr<float>()
-    );
+#define UPSCALE_FORWARD_DISPATCH(T) \
+    gradient_aware_upscale_kernel<T><<<grid, block>>>( \
+        dst_h, dst_w, src_h, src_w, \
+        roi_x1, roi_y1, roi_x2, roi_y2, \
+        (T*)render.contiguous().data_ptr<float>(), \
+        (T*)dx.contiguous().data_ptr<float>(), \
+        (T*)dy.contiguous().data_ptr<float>(), \
+        (T*)dxy.contiguous().data_ptr<float>(), \
+        (T*)output.data_ptr<float>());
+
+    switch (channels) {
+    case 1: UPSCALE_FORWARD_DISPATCH(float); break;
+    case 2: UPSCALE_FORWARD_DISPATCH(float2); break;
+    case 3: UPSCALE_FORWARD_DISPATCH(float3); break;
+    case 4: UPSCALE_FORWARD_DISPATCH(float4); break;
+    case 5: UPSCALE_FORWARD_DISPATCH(float5); break;
+    default: AT_ERROR("gradient_aware_upscale: unsupported channels ", channels);
+    }
+#undef UPSCALE_FORWARD_DISPATCH
 
     return output;
 }
@@ -580,6 +640,7 @@ gradient_aware_upscale_backward_tensor(
 
     const int src_h = render.size(0);
     const int src_w = render.size(1);
+    const int channels = render.size(2);
 
     const float roi_x1 = std::get<0>(roi);
     const float roi_y1 = std::get<1>(roi);
@@ -592,20 +653,45 @@ gradient_aware_upscale_backward_tensor(
     auto grad_dxy = torch::zeros_like(dxy);
 
     dim3 block(16, 16);
-    dim3 grid(
+    dim3 grid_src(
+        (src_w + block.x - 1) / block.x,
+        (src_h + block.y - 1) / block.y
+    );
+    dim3 grid_dst(
         (dst_w + block.x - 1) / block.x,
         (dst_h + block.y - 1) / block.y
     );
 
-    gradient_aware_upscale_backward_kernel<<<grid, block>>>(
-            dst_h, dst_w, src_h, src_w,
-            roi_x1, roi_y1, roi_x2, roi_y2,
-            (float3*)grad_output.contiguous().data_ptr<float>(),
-            (float3*)grad_render.data_ptr<float>(),
-            (float3*)grad_dx.data_ptr<float>(),
-            (float3*)grad_dy.data_ptr<float>(),
-            (float3*)grad_dxy.data_ptr<float>()
-    );
+#define UPSCALE_BACKWARD_DISPATCH(T) \
+    if constexpr (USE_SRC_CENTRIC_UPSCALE_BACKWARD) { \
+        gradient_aware_upscale_backward_src_centric_kernel<T><<<grid_src, block>>>( \
+            dst_h, dst_w, src_h, src_w, \
+            roi_x1, roi_y1, roi_x2, roi_y2, \
+            (T*)grad_output.contiguous().data_ptr<float>(), \
+            (T*)grad_render.data_ptr<float>(), \
+            (T*)grad_dx.data_ptr<float>(), \
+            (T*)grad_dy.data_ptr<float>(), \
+            (T*)grad_dxy.data_ptr<float>()); \
+    } else { \
+        gradient_aware_upscale_backward_kernel<T><<<grid_dst, block>>>( \
+            dst_h, dst_w, src_h, src_w, \
+            roi_x1, roi_y1, roi_x2, roi_y2, \
+            (T*)grad_output.contiguous().data_ptr<float>(), \
+            (T*)grad_render.data_ptr<float>(), \
+            (T*)grad_dx.data_ptr<float>(), \
+            (T*)grad_dy.data_ptr<float>(), \
+            (T*)grad_dxy.data_ptr<float>()); \
+    }
+
+    switch (channels) {
+    case 1: UPSCALE_BACKWARD_DISPATCH(float); break;
+    case 2: UPSCALE_BACKWARD_DISPATCH(float2); break;
+    case 3: UPSCALE_BACKWARD_DISPATCH(float3); break;
+    case 4: UPSCALE_BACKWARD_DISPATCH(float4); break;
+    case 5: UPSCALE_BACKWARD_DISPATCH(float5); break;
+    default: AT_ERROR("gradient_aware_upscale_backward: unsupported channels ", channels);
+    }
+#undef UPSCALE_BACKWARD_DISPATCH
 
     return std::make_tuple(grad_render, grad_dx, grad_dy, grad_dxy);
 }

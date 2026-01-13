@@ -10,6 +10,11 @@ import gsplat2d.cuda as _C
 
 from .utils import bin_and_sort_gaussians, compute_cumulative_intersects
 
+# RasterizeExtras flags (must match config.h)
+RASTERIZE_EXTRAS_NONE = 0
+RASTERIZE_EXTRAS_T = 1 << 0
+RASTERIZE_EXTRAS_UPSCALE_GRADS = 1 << 1
+
 def rasterize_gaussians(
     xys: Float[Tensor, "*batch 2"],
     extents: Float[Tensor, "*batch 2"],
@@ -20,8 +25,8 @@ def rasterize_gaussians(
     img_height: int,
     img_width: int,
     block_width: int,
-    compute_upscale_gradients: bool = False,
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    extras: int = 0,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     
     assert block_width > 1 and block_width <= 16, "block_width must be between 2 and 16"
     if colors.dtype == torch.uint8:
@@ -43,7 +48,7 @@ def rasterize_gaussians(
         img_height,
         img_width,
         block_width,
-        compute_upscale_gradients,
+        extras,
     )
 
 
@@ -62,8 +67,8 @@ class _RasterizeGaussians(Function):
         img_height: int,
         img_width: int,
         block_width: int,
-        compute_upscale_gradients: bool,
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        extras: int,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         num_points = xys.size(0)
         tile_bounds = (
             (img_width + block_width - 1) // block_width,
@@ -77,14 +82,30 @@ class _RasterizeGaussians(Function):
 
         num_intersects, cum_tiles_hit = compute_cumulative_intersects(num_tiles_hit)
 
+        have_OPA = opacities is not None and opacities.numel() > 0
+        have_T = bool(extras & RASTERIZE_EXTRAS_T)
+
         if num_intersects < 1:
-            out_img = (
-                torch.ones(img_height, img_width, colors.shape[-1], device=xys.device)
-            )
-            out_wsum = torch.zeros(img_height, img_width, device=xys.device)
-            out_dx = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
-            out_dy = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
-            out_dxy = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
+            out_img = torch.ones(img_height, img_width, colors.shape[-1], device=xys.device)
+
+            if have_T:
+                out_T = torch.zeros(img_height, img_width, 1, device=xys.device)
+            else:
+                out_T = torch.empty(0, device=xys.device)
+
+            if extras & RASTERIZE_EXTRAS_UPSCALE_GRADS:
+                out_img_dx = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
+                out_img_dy = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
+                out_img_dxy = torch.zeros(img_height, img_width, colors.shape[-1], device=xys.device)
+                if have_T:
+                    out_T_dx = torch.zeros(img_height, img_width, 1, device=xys.device)
+                    out_T_dy = torch.zeros(img_height, img_width, 1, device=xys.device)
+                    out_T_dxy = torch.zeros(img_height, img_width, 1, device=xys.device)
+                    out_S_xy_cross = torch.zeros(img_height, img_width, 1, device=xys.device)
+            else:
+                out_img_dx = out_img_dy = out_img_dxy = torch.empty(0, device=xys.device)
+                out_T_dx = out_T_dy = out_T_dxy = torch.empty(0, device=xys.device)
+                out_S_xy_cross = torch.empty(0, device=xys.device)
             gaussian_ids_sorted = torch.zeros(0, 1, device=xys.device)
             tile_bins = torch.zeros(0, 2, device=xys.device)
             final_idx = torch.zeros(img_height, img_width, device=xys.device)
@@ -107,7 +128,8 @@ class _RasterizeGaussians(Function):
             )
             rasterize_fn = _C.rasterize_forward
             
-            out_img, out_wsum, out_dx, out_dy, out_dxy, final_idx = rasterize_fn(
+            (out_img, out_T, out_img_dx, out_img_dy, out_img_dxy,
+             out_T_dx, out_T_dy, out_T_dxy, out_S_xy_cross, final_idx) = rasterize_fn(
                 tile_bounds,
                 block,
                 img_size,
@@ -117,28 +139,38 @@ class _RasterizeGaussians(Function):
                 conics,
                 colors,
                 opacities,
-                compute_upscale_gradients,
+                extras,
             )
 
         ctx.img_width = img_width
         ctx.img_height = img_height
         ctx.num_intersects = num_intersects
         ctx.block_width = block_width
-        ctx.compute_upscale_gradients = compute_upscale_gradients
+        ctx.extras = extras
+
+        have_T_out = out_T is not None and out_T.numel() > 0
+        have_T_d = out_T_dx is not None and out_T_dx.numel() > 0
+
         ctx.save_for_backward(
             gaussian_ids_sorted,
             tile_bins,
             xys,
             conics,
             colors,
-            opacities,
+            opacities if have_OPA else None,
             final_idx,
+            out_T if have_T_out else None,
+            out_T_dx if have_T_d else None,
+            out_T_dy if have_T_d else None,
+            out_T_dxy if have_T_d else None,
+            out_S_xy_cross if have_T_d else None,
         )
 
-        return out_img, out_wsum, out_dx, out_dy, out_dxy
+        return out_img, out_T, out_img_dx, out_img_dy, out_img_dxy, out_T_dx, out_T_dy, out_T_dxy
 
     @staticmethod
-    def backward(ctx, v_out_img, v_out_wsum, v_out_dx, v_out_dy, v_out_dxy):
+    def backward(ctx, v_out_img, v_out_T, v_out_img_dx, v_out_img_dy, v_out_img_dxy,
+                 v_out_T_dx, v_out_T_dy, v_out_T_dxy):
         img_height = ctx.img_height
         img_width = ctx.img_width
         num_intersects = ctx.num_intersects
@@ -151,6 +183,11 @@ class _RasterizeGaussians(Function):
             colors,
             opacities,
             final_idx,
+            out_T,
+            out_T_dx,
+            out_T_dy,
+            out_T_dxy,
+            out_S_xy_cross,
         ) = ctx.saved_tensors
 
         if num_intersects < 1:
@@ -172,13 +209,21 @@ class _RasterizeGaussians(Function):
                 xys,
                 conics,
                 colors,
-                final_idx,
-                v_out_img,
-                v_out_wsum,
                 opacities,
-                v_out_dx if ctx.compute_upscale_gradients else None,
-                v_out_dy if ctx.compute_upscale_gradients else None,
-                v_out_dxy if ctx.compute_upscale_gradients else None,
+                final_idx,
+                out_T,
+                out_T_dx,
+                out_T_dy,
+                out_T_dxy,
+                out_S_xy_cross,
+                v_out_img,
+                v_out_T,
+                v_out_img_dx,
+                v_out_img_dy,
+                v_out_img_dxy,
+                v_out_T_dx,
+                v_out_T_dy,
+                v_out_T_dxy,
             )
 
         xys.absgrad = v_xy_abs

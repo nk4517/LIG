@@ -15,3 +15,9 @@
             exit(EXIT_FAILURE);                                                \
         }                                                                      \
     } while (0)
+
+enum RasterizeExtras : unsigned {
+    RASTERIZE_EXTRAS_NONE = 0,
+    RASTERIZE_EXTRAS_T = 1 << 0,           // compute transmittance T
+    RASTERIZE_EXTRAS_UPSCALE_GRADS = 1 << 1  // compute derivatives for upscale
+};
