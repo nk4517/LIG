@@ -37,3 +37,19 @@ __global__ void gradient_aware_upscale_backward_kernel(
     T* __restrict__ grad_dy,
     T* __restrict__ grad_dxy
 );
+template<typename T>
+__global__ void gradient_aware_upscale_backward_src_centric_kernel(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_render,
+    T* __restrict__ grad_dx,
+    T* __restrict__ grad_dy,
+    T* __restrict__ grad_dxy
+);

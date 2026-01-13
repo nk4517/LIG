@@ -329,3 +329,117 @@ __global__ void gradient_aware_upscale_backward_kernel(
     atomic_add_scaled(grad_dxy, idx10, g, cx[2] * cy[3]);
     atomic_add_scaled(grad_dxy, idx11, g, cx[3] * cy[3]);
 }
+
+
+// Src-centric backward kernel: iterates over src pixels, no atomics needed
+// Each src pixel (sx, sy) participates as corner in up to 4 cells:
+//   role (0,0): cell [sx, sx+1) x [sy, sy+1)
+//   role (0,1): cell [sx, sx+1) x [sy-1, sy)
+//   role (1,0): cell [sx-1, sx) x [sy, sy+1)
+//   role (1,1): cell [sx-1, sx) x [sy-1, sy)
+template<typename T>
+__global__ void gradient_aware_upscale_backward_src_centric_kernel(
+    const int dst_h,
+    const int dst_w,
+    const int src_h,
+    const int src_w,
+    const float roi_x1,
+    const float roi_y1,
+    const float roi_x2,
+    const float roi_y2,
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_render,
+    T* __restrict__ grad_dx,
+    T* __restrict__ grad_dy,
+    T* __restrict__ grad_dxy
+) {
+    const int sx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int sy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (sx >= src_w || sy >= src_h) return;
+
+    const float roi_w = roi_x2 - roi_x1;
+    const float roi_h = roi_y2 - roi_y1;
+    const float scale_x = (float)dst_w / roi_w;
+    const float scale_y = (float)dst_h / roi_h;
+
+    T acc_f{}, acc_fx{}, acc_fy{}, acc_fxy{};
+
+    // Process all 4 roles this src pixel can have
+    // role_x: 0 = src is left edge (x0), 1 = src is right edge (x1)
+    // role_y: 0 = src is top edge (y0), 1 = src is bottom edge (y1)
+    #pragma unroll
+    for (int role_x = 0; role_x < 2; role_x++) {
+        #pragma unroll
+        for (int role_y = 0; role_y < 2; role_y++) {
+            // Cell where this src pixel is corner (role_x, role_y)
+            // cell_x0 = sx - role_x, cell_y0 = sy - role_y
+            const int cell_x0 = sx - role_x;
+            const int cell_y0 = sy - role_y;
+
+            // Skip invalid cells (outside src bounds)
+            if (cell_x0 < 0 || cell_x0 >= src_w - 1) continue;
+            if (cell_y0 < 0 || cell_y0 >= src_h - 1) continue;
+
+            // Find dst pixels that map to this cell
+            // src_x = roi_x1 + (dst_x + 0.5) * roi_w / dst_w - 0.5
+            // cell_x0 <= src_x < cell_x0 + 1
+            // (cell_x0 + 0.5 - roi_x1) * scale_x - 0.5 <= dst_x < (cell_x0 + 1.5 - roi_x1) * scale_x - 0.5
+
+            // For boundary handling: extend range to include clamped pixels
+            float cell_x_lo = cell_x0 + 0.5f;
+            float cell_x_hi = cell_x0 + 1.5f;
+            float cell_y_lo = cell_y0 + 0.5f;
+            float cell_y_hi = cell_y0 + 1.5f;
+            
+            // Extend to capture clamped dst pixels at boundaries
+            if (cell_x0 == 0) cell_x_lo = -1e9f;
+            if (cell_x0 == src_w - 2) cell_x_hi = 1e9f;
+            if (cell_y0 == 0) cell_y_lo = -1e9f;
+            if (cell_y0 == src_h - 2) cell_y_hi = 1e9f;
+            
+            const int dst_x_min = max(0, (int)ceilf((cell_x_lo - roi_x1) * scale_x - 0.5f));
+            const int dst_x_max = min(dst_w - 1, (int)floorf((cell_x_hi - roi_x1) * scale_x - 0.5f - 1e-6f));
+            const int dst_y_min = max(0, (int)ceilf((cell_y_lo - roi_y1) * scale_y - 0.5f));
+            const int dst_y_max = min(dst_h - 1, (int)floorf((cell_y_hi - roi_y1) * scale_y - 0.5f - 1e-6f));
+
+            // F matrix indices for this role:
+            // role (0,0): f->F[0,0], fx->F[2,0], fy->F[0,2], fxy->F[2,2] => cx[0]*cy[0], cx[2]*cy[0], cx[0]*cy[2], cx[2]*cy[2]
+            // role (0,1): f->F[1,0], fx->F[3,0], fy->F[1,2], fxy->F[3,2] => cx[1]*cy[0], cx[3]*cy[0], cx[1]*cy[2], cx[3]*cy[2]
+            // role (1,0): f->F[0,1], fx->F[2,1], fy->F[0,3], fxy->F[2,3] => cx[0]*cy[1], cx[2]*cy[1], cx[0]*cy[3], cx[2]*cy[3]
+            // role (1,1): f->F[1,1], fx->F[3,1], fy->F[1,3], fxy->F[3,3] => cx[1]*cy[1], cx[3]*cy[1], cx[1]*cy[3], cx[3]*cy[3]
+            const int cx_f_idx = role_x;      // 0 or 1
+            const int cx_d_idx = role_x + 2;  // 2 or 3
+            const int cy_f_idx = role_y;      // 0 or 1
+            const int cy_d_idx = role_y + 2;  // 2 or 3
+
+            for (int dst_y = dst_y_min; dst_y <= dst_y_max; dst_y++) {
+                const float src_y_f = roi_y1 + (dst_y + 0.5f) * roi_h / dst_h - 0.5f;
+                const float ty = src_y_f - cell_y0;
+                float cy[4];
+                compute_C_inv_T_p(ty, cy);
+
+                for (int dst_x = dst_x_min; dst_x <= dst_x_max; dst_x++) {
+                    const float src_x_f = roi_x1 + (dst_x + 0.5f) * roi_w / dst_w - 0.5f;
+                    const float tx = src_x_f - cell_x0;
+                    float cx[4];
+                    compute_C_inv_T_p(tx, cx);
+
+                    const T g = grad_output[dst_y * dst_w + dst_x];
+
+                    acc_f   += g * (cx[cx_f_idx] * cy[cy_f_idx]);
+                    acc_fx  += g * (cx[cx_d_idx] * cy[cy_f_idx]);
+                    acc_fy  += g * (cx[cx_f_idx] * cy[cy_d_idx]);
+                    acc_fxy += g * (cx[cx_d_idx] * cy[cy_d_idx]);
+                }
+            }
+        }
+    }
+
+    const int src_idx = sy * src_w + sx;
+    grad_render[src_idx] = acc_f;
+    grad_dx[src_idx] = acc_fx;
+    grad_dy[src_idx] = acc_fy;
+    grad_dxy[src_idx] = acc_fxy;
+}
+
