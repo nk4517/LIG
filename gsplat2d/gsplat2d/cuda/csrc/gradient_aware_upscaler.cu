@@ -178,6 +178,7 @@ __device__ __forceinline__ T spline_interp(
     return cx[0] * Fcy0 + cx[1] * Fcy1 + cx[2] * Fcy2 + cx[3] * Fcy3;
 }
 
+template<typename T>
 __global__ void gradient_aware_upscale_kernel(
     const int dst_h,
     const int dst_w,
@@ -187,11 +188,11 @@ __global__ void gradient_aware_upscale_kernel(
     const float roi_y1,
     const float roi_x2,
     const float roi_y2,
-    const float3* __restrict__ render,  // [H, W] of float3 (HWC)
-    const float3* __restrict__ dx,
-    const float3* __restrict__ dy,
-    const float3* __restrict__ dxy,
-    float3* __restrict__ output
+    const T* __restrict__ render,
+    const T* __restrict__ dx,
+    const T* __restrict__ dy,
+    const T* __restrict__ dxy,
+    T* __restrict__ output
 ) {
     const int dst_x = blockIdx.x * blockDim.x + threadIdx.x;
     const int dst_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -228,13 +229,13 @@ __global__ void gradient_aware_upscale_kernel(
     const int idx10 = y1 * src_w + x0;
     const int idx11 = y1 * src_w + x1;
 
-    const float3 f00 = render[idx00], f01 = render[idx01], f10 = render[idx10], f11 = render[idx11];
-    const float3 fx00 = dx[idx00], fx01 = dx[idx01], fx10 = dx[idx10], fx11 = dx[idx11];
-    const float3 fy00 = dy[idx00], fy01 = dy[idx01], fy10 = dy[idx10], fy11 = dy[idx11];
-    const float3 fxy00 = dxy[idx00], fxy01 = dxy[idx01], fxy10 = dxy[idx10], fxy11 = dxy[idx11];
+    const T f00 = render[idx00], f01 = render[idx01], f10 = render[idx10], f11 = render[idx11];
+    const T fx00 = dx[idx00], fx01 = dx[idx01], fx10 = dx[idx10], fx11 = dx[idx11];
+    const T fy00 = dy[idx00], fy01 = dy[idx01], fy10 = dy[idx10], fy11 = dy[idx11];
+    const T fxy00 = dxy[idx00], fxy01 = dxy[idx01], fxy10 = dxy[idx10], fxy11 = dxy[idx11];
 
     // Interpolate each channel
-    float3 result = spline_interp(
+    T result = spline_interp(
         f00, f01, f10, f11,
         fx00, fx01, fx10, fx11,
         fy00, fy01, fy10, fy11,
@@ -245,6 +246,7 @@ __global__ void gradient_aware_upscale_kernel(
     output[dst_y * dst_w + dst_x] = result;
 }
 
+template<typename T>
 __global__ void gradient_aware_upscale_backward_kernel(
     const int dst_h,
     const int dst_w,
@@ -254,11 +256,11 @@ __global__ void gradient_aware_upscale_backward_kernel(
     const float roi_y1,
     const float roi_x2,
     const float roi_y2,
-    const float3* __restrict__ grad_output,  // [dst_H, dst_W] of float3
-    float3* __restrict__ grad_render,        // [src_H, src_W] of float3
-    float3* __restrict__ grad_dx,
-    float3* __restrict__ grad_dy,
-    float3* __restrict__ grad_dxy
+    const T* __restrict__ grad_output,  // [dst_H, dst_W] of float3
+    T* __restrict__ grad_render,        // [src_H, src_W] of float3
+    T* __restrict__ grad_dx,
+    T* __restrict__ grad_dy,
+    T* __restrict__ grad_dxy
 ) {
     const int dst_x = blockIdx.x * blockDim.x + threadIdx.x;
     const int dst_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -295,77 +297,35 @@ __global__ void gradient_aware_upscale_backward_kernel(
     // row 2: [fx00, fx10, fxy00, fxy10]
     // row 3: [fx01, fx11, fxy01, fxy11]
 
-    const float3 g = grad_output[dst_y * dst_w + dst_x];
+    const T g = grad_output[dst_y * dst_w + dst_x];
 
-    // Precompute coefficient products (same for all channels)
-    const float c00 = cx[0] * cy[0], c01 = cx[0] * cy[1], c02 = cx[0] * cy[2], c03 = cx[0] * cy[3];
-    const float c10 = cx[1] * cy[0], c11 = cx[1] * cy[1], c12 = cx[1] * cy[2], c13 = cx[1] * cy[3];
-    const float c20 = cx[2] * cy[0], c21 = cx[2] * cy[1], c22 = cx[2] * cy[2], c23 = cx[2] * cy[3];
-    const float c30 = cx[3] * cy[0], c31 = cx[3] * cy[1], c32 = cx[3] * cy[2], c33 = cx[3] * cy[3];
-
-    // Corner indices
+    // Corner indices in src image
     const int idx00 = y0 * src_w + x0;
     const int idx01 = y0 * src_w + x1;
     const int idx10 = y1 * src_w + x0;
     const int idx11 = y1 * src_w + x1;
 
     // grad_render: F[0,0]=f00, F[0,1]=f10, F[1,0]=f01, F[1,1]=f11
-    float* gr = (float*)grad_render;
-    atomicAdd(&gr[idx00 * 3 + 0], g.x * c00);
-    atomicAdd(&gr[idx00 * 3 + 1], g.y * c00);
-    atomicAdd(&gr[idx00 * 3 + 2], g.z * c00);
-    atomicAdd(&gr[idx01 * 3 + 0], g.x * c10);
-    atomicAdd(&gr[idx01 * 3 + 1], g.y * c10);
-    atomicAdd(&gr[idx01 * 3 + 2], g.z * c10);
-    atomicAdd(&gr[idx10 * 3 + 0], g.x * c01);
-    atomicAdd(&gr[idx10 * 3 + 1], g.y * c01);
-    atomicAdd(&gr[idx10 * 3 + 2], g.z * c01);
-    atomicAdd(&gr[idx11 * 3 + 0], g.x * c11);
-    atomicAdd(&gr[idx11 * 3 + 1], g.y * c11);
-    atomicAdd(&gr[idx11 * 3 + 2], g.z * c11);
+    atomic_add_scaled(grad_render, idx00, g, cx[0] * cy[0]);
+    atomic_add_scaled(grad_render, idx01, g, cx[1] * cy[0]);
+    atomic_add_scaled(grad_render, idx10, g, cx[0] * cy[1]);
+    atomic_add_scaled(grad_render, idx11, g, cx[1] * cy[1]);
 
     // grad_dx: F[2,0]=fx00, F[2,1]=fx10, F[3,0]=fx01, F[3,1]=fx11
-    float* gx = (float*)grad_dx;
-    atomicAdd(&gx[idx00 * 3 + 0], g.x * c20);
-    atomicAdd(&gx[idx00 * 3 + 1], g.y * c20);
-    atomicAdd(&gx[idx00 * 3 + 2], g.z * c20);
-    atomicAdd(&gx[idx01 * 3 + 0], g.x * c30);
-    atomicAdd(&gx[idx01 * 3 + 1], g.y * c30);
-    atomicAdd(&gx[idx01 * 3 + 2], g.z * c30);
-    atomicAdd(&gx[idx10 * 3 + 0], g.x * c21);
-    atomicAdd(&gx[idx10 * 3 + 1], g.y * c21);
-    atomicAdd(&gx[idx10 * 3 + 2], g.z * c21);
-    atomicAdd(&gx[idx11 * 3 + 0], g.x * c31);
-    atomicAdd(&gx[idx11 * 3 + 1], g.y * c31);
-    atomicAdd(&gx[idx11 * 3 + 2], g.z * c31);
+    atomic_add_scaled(grad_dx, idx00, g, cx[2] * cy[0]);
+    atomic_add_scaled(grad_dx, idx01, g, cx[3] * cy[0]);
+    atomic_add_scaled(grad_dx, idx10, g, cx[2] * cy[1]);
+    atomic_add_scaled(grad_dx, idx11, g, cx[3] * cy[1]);
 
     // grad_dy: F[0,2]=fy00, F[0,3]=fy10, F[1,2]=fy01, F[1,3]=fy11
-    float* gy = (float*)grad_dy;
-    atomicAdd(&gy[idx00 * 3 + 0], g.x * c02);
-    atomicAdd(&gy[idx00 * 3 + 1], g.y * c02);
-    atomicAdd(&gy[idx00 * 3 + 2], g.z * c02);
-    atomicAdd(&gy[idx01 * 3 + 0], g.x * c12);
-    atomicAdd(&gy[idx01 * 3 + 1], g.y * c12);
-    atomicAdd(&gy[idx01 * 3 + 2], g.z * c12);
-    atomicAdd(&gy[idx10 * 3 + 0], g.x * c03);
-    atomicAdd(&gy[idx10 * 3 + 1], g.y * c03);
-    atomicAdd(&gy[idx10 * 3 + 2], g.z * c03);
-    atomicAdd(&gy[idx11 * 3 + 0], g.x * c13);
-    atomicAdd(&gy[idx11 * 3 + 1], g.y * c13);
-    atomicAdd(&gy[idx11 * 3 + 2], g.z * c13);
+    atomic_add_scaled(grad_dy, idx00, g, cx[0] * cy[2]);
+    atomic_add_scaled(grad_dy, idx01, g, cx[1] * cy[2]);
+    atomic_add_scaled(grad_dy, idx10, g, cx[0] * cy[3]);
+    atomic_add_scaled(grad_dy, idx11, g, cx[1] * cy[3]);
 
     // grad_dxy: F[2,2]=fxy00, F[2,3]=fxy10, F[3,2]=fxy01, F[3,3]=fxy11
-    float* gxy = (float*)grad_dxy;
-    atomicAdd(&gxy[idx00 * 3 + 0], g.x * c22);
-    atomicAdd(&gxy[idx00 * 3 + 1], g.y * c22);
-    atomicAdd(&gxy[idx00 * 3 + 2], g.z * c22);
-    atomicAdd(&gxy[idx01 * 3 + 0], g.x * c32);
-    atomicAdd(&gxy[idx01 * 3 + 1], g.y * c32);
-    atomicAdd(&gxy[idx01 * 3 + 2], g.z * c32);
-    atomicAdd(&gxy[idx10 * 3 + 0], g.x * c23);
-    atomicAdd(&gxy[idx10 * 3 + 1], g.y * c23);
-    atomicAdd(&gxy[idx10 * 3 + 2], g.z * c23);
-    atomicAdd(&gxy[idx11 * 3 + 0], g.x * c33);
-    atomicAdd(&gxy[idx11 * 3 + 1], g.y * c33);
-    atomicAdd(&gxy[idx11 * 3 + 2], g.z * c33);
+    atomic_add_scaled(grad_dxy, idx00, g, cx[2] * cy[2]);
+    atomic_add_scaled(grad_dxy, idx01, g, cx[3] * cy[2]);
+    atomic_add_scaled(grad_dxy, idx10, g, cx[2] * cy[3]);
+    atomic_add_scaled(grad_dxy, idx11, g, cx[3] * cy[3]);
 }
