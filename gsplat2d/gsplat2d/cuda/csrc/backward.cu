@@ -245,3 +245,123 @@ __global__ void project_gaussians_backward_kernel_cholesky(
     bool all_finite = isfinite(v_l11) & isfinite(v_l21) & isfinite(v_l22);
     v_cholesky[idx] = all_finite ? float3{v_l11, v_l21, v_l22} : float3{0.f, 0.f, 0.f};
 }
+
+
+/**
+ * Backward pass for weighted sum rasterization with gradient-aware upscaling
+ * 
+ * ============================================================================
+ * NOTE: UNSORTED WEIGHTED SUM vs SORTED ALPHA-COMPOSITING
+ * ============================================================================
+ * 
+ * This implementation uses unsorted weighted sum (no depth sorting).
+ * The original 3DGS uses sorted alpha-compositing with final_idx to track
+ * early termination when transmittance T < threshold. final_idx optimization
+ * is incompatible with unsorted rendering: without depth ordering, there is
+ * no "tail" of low-visibility gaussians that can be safely skipped.
+ * 
+ * ============================================================================
+ * MATHEMATICAL DERIVATION
+ * ============================================================================
+ * 
+ * Forward outputs (all per-pixel):
+ *   I(x,y)      = Σ c_i * α_i           -- color image
+ *   ∂I/∂x       = Σ c_i * α_x,i         -- image x-gradient  
+ *   ∂I/∂y       = Σ c_i * α_y,i         -- image y-gradient
+ *   ∂²I/∂x∂y    = Σ c_i * α_xy,i        -- mixed partial
+ *   W           = Σ α_i                 -- weight sum
+ * 
+ * where for each gaussian i:
+ *   d = [px - μ_x, py - μ_y]            -- pixel-to-center offset
+ *   σ = 0.5*(a*d_x² + c*d_y²) + b*d_x*d_y   -- quadratic form (conic = {a,b,c})
+ *   α = exp(-σ)                         -- gaussian weight
+ *   
+ *   σ_x = ∂σ/∂x = a*d_x + b*d_y
+ *   σ_y = ∂σ/∂y = b*d_x + c*d_y  
+ *   σ_xy = ∂²σ/∂x∂y = b
+ *   
+ *   α_x  = ∂α/∂x = -α * σ_x
+ *   α_y  = ∂α/∂y = -α * σ_y
+ *   α_xy = ∂²α/∂x∂y = α * (σ_x * σ_y - σ_xy)
+ * 
+ * Incoming gradients from loss (via spline upscaler):
+ *   v_I   = ∂L/∂I
+ *   v_dx  = ∂L/∂(∂I/∂x)
+ *   v_dy  = ∂L/∂(∂I/∂y)
+ *   v_dxy = ∂L/∂(∂²I/∂x∂y)
+ *   v_W   = ∂L/∂W
+ * 
+ * ============================================================================
+ * GRADIENTS W.R.T. COLOR c_k
+ * ============================================================================
+ * 
+ * ∂L/∂c_k = v_I * α_k + v_dx * α_x,k + v_dy * α_y,k + v_dxy * α_xy,k
+ * 
+ * ============================================================================
+ * GRADIENTS W.R.T. GAUSSIAN PARAMETERS (via chain rule through α)
+ * ============================================================================
+ * 
+ * Intermediate "virtual gradients" on α and its derivatives:
+ *   v_α   = dot(v_I, c) + v_W
+ *   v_αx  = dot(v_dx, c)
+ *   v_αy  = dot(v_dy, c)
+ *   v_αxy = dot(v_dxy, c)
+ * 
+ * ============================================================================
+ * GRADIENTS W.R.T. POSITION μ
+ * ============================================================================
+ * 
+ * Note: d = pixel - μ, so ∂d/∂μ = -1
+ * 
+ * ∂α/∂μ_x = α * σ_x           (since ∂σ/∂μ_x = -σ_x)
+ * ∂α/∂μ_y = α * σ_y
+ * 
+ * ∂α_x/∂μ_x = α * (a - σ_x²)
+ * ∂α_x/∂μ_y = α * (b - σ_x * σ_y)
+ * 
+ * ∂α_y/∂μ_x = α * (b - σ_x * σ_y)
+ * ∂α_y/∂μ_y = α * (c - σ_y²)
+ * 
+ * ∂α_xy/∂μ_x = α * (σ_x² * σ_y - 2*b*σ_x - a*σ_y)
+ * ∂α_xy/∂μ_y = α * (σ_x * σ_y² - 2*b*σ_y - c*σ_x)
+ * 
+ * Total:
+ * ∂L/∂μ_x = v_α * α * σ_x 
+ *         + v_αx * α * (a - σ_x²)
+ *         + v_αy * α * (b - σ_x * σ_y)
+ *         + v_αxy * α * (σ_x² * σ_y - 2*b*σ_x - a*σ_y)
+ * 
+ * ∂L/∂μ_y = v_α * α * σ_y
+ *         + v_αx * α * (b - σ_x * σ_y)
+ *         + v_αy * α * (c - σ_y²)
+ *         + v_αxy * α * (σ_x * σ_y² - 2*b*σ_y - c*σ_x)
+ * 
+ * ============================================================================
+ * GRADIENTS W.R.T. CONIC (inverse covariance) {a, b, c}
+ * ============================================================================
+ * 
+ * ∂σ/∂a = 0.5*d_x²,  ∂σ/∂b = d_x*d_y,  ∂σ/∂c = 0.5*d_y²
+ * ∂σ_x/∂a = d_x,     ∂σ_x/∂b = d_y,    ∂σ_x/∂c = 0
+ * ∂σ_y/∂a = 0,       ∂σ_y/∂b = d_x,    ∂σ_y/∂c = d_y
+ * ∂σ_xy/∂b = 1       (others = 0)
+ * 
+ * ∂α/∂a = -α * 0.5 * d_x²
+ * ∂α/∂b = -α * d_x * d_y
+ * ∂α/∂c = -α * 0.5 * d_y²
+ * 
+ * ∂α_x/∂a = α * (0.5 * d_x² * σ_x - d_x)
+ * ∂α_x/∂b = α * (d_x * d_y * σ_x - d_y)
+ * ∂α_x/∂c = α * (0.5 * d_y² * σ_x)
+ * 
+ * ∂α_y/∂a = α * (0.5 * d_x² * σ_y)
+ * ∂α_y/∂b = α * (d_x * d_y * σ_y - d_x)
+ * ∂α_y/∂c = α * (0.5 * d_y² * σ_y - d_y)
+ * 
+ * Let P = σ_x * σ_y - b (the term in α_xy = α * P)
+ * ∂α_xy/∂a = α * (-0.5 * d_x² * P + d_x * σ_y)
+ * ∂α_xy/∂b = α * (-d_x * d_y * P + d_y * σ_y + d_x * σ_x - 1)
+ * ∂α_xy/∂c = α * (-0.5 * d_y² * P + d_y * σ_x)
+ * 
+ * Total for each conic component combines all four gradient paths.
+ */
+
