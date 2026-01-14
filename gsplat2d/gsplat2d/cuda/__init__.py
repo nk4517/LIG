@@ -18,6 +18,7 @@ project_gaussians_forward = _make_lazy_cuda_func("project_gaussians_forward")
 project_gaussians_backward = _make_lazy_cuda_func("project_gaussians_backward")
 map_gaussian_to_intersects = _make_lazy_cuda_func("map_gaussian_to_intersects")
 get_tile_bin_edges = _make_lazy_cuda_func("get_tile_bin_edges")
+bin_and_group_gaussians_fused = _make_lazy_cuda_func("bin_and_group_gaussians_fused")
 
 project_gaussians_forward_cholesky = _make_lazy_cuda_func("project_gaussians_forward_cholesky")
 project_gaussians_backward_cholesky = _make_lazy_cuda_func("project_gaussians_backward_cholesky")

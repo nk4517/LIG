@@ -169,6 +169,97 @@ __global__ void get_tile_bin_edges(
     }
 }
 
+// Kernel for computing tile bin edges from offsets
+__global__ void get_tile_bin_edges_from_offsets(
+    const int num_tiles,
+    const int num_intersects,
+    const int32_t* __restrict__ tile_counts,
+    const int32_t* __restrict__ offsets,
+    int2* __restrict__ tile_bins
+) {
+    unsigned idx = cg::this_grid().thread_rank();
+    if (idx >= num_tiles)
+        return;
+
+    int32_t start = offsets[idx];
+    int32_t count = tile_counts[idx];
+    tile_bins[idx] = {start, start + count};
+}
+
+// Fused kernel: iterate over gaussians, count intersections per tile
+__global__ void fused_map_and_count_kernel(
+    const int num_points,
+    const float2* __restrict__ xys,
+    const float2* __restrict__ extents,
+    const dim3 tile_bounds,
+    const unsigned block_width,
+    int32_t* __restrict__ tile_counts
+) {
+    unsigned idx = cg::this_grid().thread_rank();
+    if (idx >= num_points)
+        return;
+    if (extents[idx].x <= 0.f || extents[idx].y <= 0.f)
+        return;
+
+    float2 center = xys[idx];
+    uint2 tile_min, tile_max;
+    get_tile_bbox(center, extents[idx], tile_bounds, tile_min, tile_max, block_width);
+
+    for (int i = tile_min.y; i < tile_max.y; ++i) {
+        for (int j = tile_min.x; j < tile_max.x; ++j) {
+            int32_t tile_id = i * tile_bounds.x + j;
+            atomicAdd(&tile_counts[tile_id], 1);
+        }
+    }
+}
+
+// Fused kernel: iterate over gaussians, scatter directly to grouped buffers
+__global__ void fused_map_and_scatter_kernel(
+    const int num_points,
+    const float2* __restrict__ xys,
+    const float* __restrict__ depths,
+    const float2* __restrict__ extents,
+    const dim3 tile_bounds,
+    const unsigned block_width,
+    const int32_t* __restrict__ offsets,
+    int32_t* __restrict__ tile_counters,
+    int32_t* __restrict__ gaussian_ids_out
+) {
+    unsigned idx = cg::this_grid().thread_rank();
+    if (idx >= num_points)
+        return;
+    if (extents[idx].x <= 0.f || extents[idx].y <= 0.f)
+        return;
+
+    float2 center = xys[idx];
+    uint2 tile_min, tile_max;
+    get_tile_bbox(center, extents[idx], tile_bounds, tile_min, tile_max, block_width);
+
+    for (int i = tile_min.y; i < tile_max.y; ++i) {
+        for (int j = tile_min.x; j < tile_max.x; ++j) {
+            int32_t tile_id = i * tile_bounds.x + j;
+            int32_t pos = offsets[tile_id] + atomicAdd(&tile_counters[tile_id], 1);
+            gaussian_ids_out[pos] = idx;
+        }
+    }
+}
+
+// Kernel for computing tile bin edges from tile_counts and offsets
+__global__ void compute_tile_bins_kernel(
+    const int num_tiles,
+    const int32_t* __restrict__ tile_counts,
+    const int32_t* __restrict__ offsets,
+    int2* __restrict__ tile_bins
+) {
+    unsigned idx = cg::this_grid().thread_rank();
+    if (idx >= num_tiles)
+        return;
+
+    int32_t start = offsets[idx];
+    int32_t count = tile_counts[idx];
+    tile_bins[idx] = {start, start + count};
+}
+
 template<bool WITH_UPSCALE_GRADS>
 __global__ void rasterize_forward_unified(
     const dim3 tile_bounds,

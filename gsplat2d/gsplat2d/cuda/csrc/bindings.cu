@@ -300,6 +300,85 @@ torch::Tensor get_tile_bin_edges_tensor(
     return tile_bins;
 }
 
+std::tuple<int, torch::Tensor, torch::Tensor>
+bin_and_group_gaussians_fused_tensor(
+    const int num_points,
+    const torch::Tensor &xys,
+    const torch::Tensor &depths,
+    const torch::Tensor &extents,
+    const std::tuple<int, int, int> tile_bounds,
+    const unsigned block_width
+) {
+    DEVICE_GUARD(xys);
+    CHECK_INPUT(xys);
+    CHECK_INPUT(depths);
+    CHECK_INPUT(extents);
+
+    dim3 tile_bounds_dim3;
+    tile_bounds_dim3.x = std::get<0>(tile_bounds);
+    tile_bounds_dim3.y = std::get<1>(tile_bounds);
+    tile_bounds_dim3.z = std::get<2>(tile_bounds);
+
+    int num_tiles = tile_bounds_dim3.x * tile_bounds_dim3.y;
+    auto opt = xys.options();
+
+    // Pass 1: count intersections per tile
+    torch::Tensor tile_counts = torch::zeros({num_tiles}, opt.dtype(torch::kInt32));
+    fused_map_and_count_kernel<<<
+        (num_points + N_THREADS - 1) / N_THREADS,
+        N_THREADS>>>(
+        num_points,
+        (float2 *)xys.contiguous().data_ptr<float>(),
+        (float2 *)extents.contiguous().data_ptr<float>(),
+        tile_bounds_dim3,
+        block_width,
+        tile_counts.data_ptr<int32_t>()
+    );
+
+    // Compute total intersects and offsets
+    torch::Tensor cumsum = torch::cumsum(tile_counts, 0, torch::kInt32);
+    int num_intersects = cumsum[-1].item<int>();
+    
+    torch::Tensor offsets = torch::zeros({num_tiles}, opt.dtype(torch::kInt32));
+    if (num_tiles > 1) {
+        offsets.slice(0, 1) = cumsum.slice(0, 0, -1);
+    }
+
+    // Pass 2: scatter gaussian_ids directly to grouped positions
+    torch::Tensor tile_counters = torch::zeros({num_tiles}, opt.dtype(torch::kInt32));
+    torch::Tensor gaussian_ids_grouped = torch::empty({num_intersects}, opt.dtype(torch::kInt32));
+    torch::Tensor tile_bins = torch::zeros({num_tiles, 2}, opt.dtype(torch::kInt32));
+
+    if (num_intersects > 0) {
+        fused_map_and_scatter_kernel<<<
+            (num_points + N_THREADS - 1) / N_THREADS,
+            N_THREADS>>>(
+            num_points,
+            (float2 *)xys.contiguous().data_ptr<float>(),
+            depths.contiguous().data_ptr<float>(),
+            (float2 *)extents.contiguous().data_ptr<float>(),
+            tile_bounds_dim3,
+            block_width,
+            offsets.data_ptr<int32_t>(),
+            tile_counters.data_ptr<int32_t>(),
+            gaussian_ids_grouped.data_ptr<int32_t>()
+        );
+
+        // Compute tile bins
+        get_tile_bin_edges_from_offsets<<<
+            (num_tiles + N_THREADS - 1) / N_THREADS,
+            N_THREADS>>>(
+            num_tiles,
+            num_intersects,
+            tile_counts.data_ptr<int32_t>(),
+            offsets.data_ptr<int32_t>(),
+            (int2 *)tile_bins.data_ptr<int32_t>()
+        );
+    }
+
+    return std::make_tuple(num_intersects, gaussian_ids_grouped, tile_bins);
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,

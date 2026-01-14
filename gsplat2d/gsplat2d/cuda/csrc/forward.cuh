@@ -48,6 +48,35 @@ __global__ void get_tile_bin_edges(
     const int num_intersects, const int64_t* __restrict__ isect_ids_sorted, int2* __restrict__ tile_bins
 );
 
+__global__ void get_tile_bin_edges_from_offsets(
+    const int num_tiles,
+    const int num_intersects,
+    const int32_t* __restrict__ tile_counts,
+    const int32_t* __restrict__ offsets,
+    int2* __restrict__ tile_bins
+);
+
+__global__ void fused_map_and_count_kernel(
+    const int num_points,
+    const float2* __restrict__ xys,
+    const float2* __restrict__ extents,
+    const dim3 tile_bounds,
+    const unsigned block_width,
+    int32_t* __restrict__ tile_counts
+);
+
+__global__ void fused_map_and_scatter_kernel(
+    const int num_points,
+    const float2* __restrict__ xys,
+    const float* __restrict__ depths,
+    const float2* __restrict__ extents,
+    const dim3 tile_bounds,
+    const unsigned block_width,
+    const int32_t* __restrict__ offsets,
+    int32_t* __restrict__ tile_counters,
+    int32_t* __restrict__ gaussian_ids_out
+);
+
 // compute output color image from binned and sorted gaussians
 template<bool WITH_UPSCALE_GRADS>
 __global__ void rasterize_forward_unified(

@@ -98,3 +98,25 @@ def bin_and_sort_gaussians(
     gaussian_ids_sorted = torch.gather(gaussian_ids, 0, sorted_indices)
     tile_bins = get_tile_bin_edges(num_intersects, isect_ids_sorted, tile_bounds)
     return isect_ids, gaussian_ids, isect_ids_sorted, gaussian_ids_sorted, tile_bins
+
+
+def bin_and_group_gaussians_fused(
+    num_points: int,
+    xys: Float[Tensor, "batch 2"],
+    depths: Float[Tensor, "batch 1"],
+    extents: Float[Tensor, "batch 2"],
+    tile_bounds: Tuple[int, int, int],
+    block_size: int,
+) -> Tuple[
+    int,
+    Float[Tensor, "num_intersects 1"],
+    Float[Tensor, "num_intersects 2"],
+]:
+    return _C.bin_and_group_gaussians_fused(
+        num_points,
+        xys.contiguous(),
+        depths.contiguous(),
+        extents.contiguous(),
+        tile_bounds,
+        block_size,
+    )

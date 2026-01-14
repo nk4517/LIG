@@ -12,6 +12,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("compute_cov2d_bounds", &compute_cov2d_bounds_tensor);
     m.def("map_gaussian_to_intersects", &map_gaussian_to_intersects_tensor);
     m.def("get_tile_bin_edges", &get_tile_bin_edges_tensor);
+    m.def("bin_and_group_gaussians_fused", &bin_and_group_gaussians_fused_tensor);
 
     m.def("gradient_aware_upscale_forward", &gradient_aware_upscale_forward_tensor);
     m.def("gradient_aware_upscale_backward", &gradient_aware_upscale_backward_tensor);

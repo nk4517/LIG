@@ -92,6 +92,16 @@ torch::Tensor get_tile_bin_edges_tensor(
     const std::tuple<int, int, int> tile_bounds
 );
 
+std::tuple<int, torch::Tensor, torch::Tensor>
+bin_and_group_gaussians_fused_tensor(
+    const int num_points,
+    const torch::Tensor &xys,
+    const torch::Tensor &depths,
+    const torch::Tensor &extents,
+    const std::tuple<int, int, int> tile_bounds,
+    const unsigned block_width
+);
+
 std::tuple<
     torch::Tensor, // output img
     torch::Tensor, // output T - optional, empty if opacities not provided
