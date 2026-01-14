@@ -129,7 +129,7 @@ class Gaussian2DMinimal(nn.Module):
         xys, extents, conics, num_tiles_hit = project_gaussians_cholesky(
             self.cholesky, self.means, self.H, self.W, self.B_SIZE, self.opacities
         )
-        out_img, out_wsum, dx, dy, dxy = rasterize_gaussians(
+        out_img, out_WT, out_img_dx, out_img_dy, out_img_dxy, out_WT_dx, out_WT_dy, out_WT_dxy = rasterize_gaussians(
             xys, extents, conics, num_tiles_hit,
             self.rgbs, self.opacities,
             self.H, self.W, self.B_SIZE,
@@ -137,7 +137,7 @@ class Gaussian2DMinimal(nn.Module):
         )
         return {
             "render": out_img.permute(2, 0, 1),
-            "render_hwc": out_img, "wsum": out_wsum, "dx": dx, "dy": dy, "dxy": dxy,
+            "render_hwc": out_img, "wsum": out_WT, "dx": out_img_dx, "dy": out_img_dy, "dxy": out_img_dxy,
         }
 
     def scale_to(self, new_H: int, new_W: int):
