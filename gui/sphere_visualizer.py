@@ -109,7 +109,7 @@ class SphereVisualizerGUI(VisualizerGUI):
 
 
 def main():
-    eac_path = Path(r"P:\3d_printing\_gsplat_sandbox\splatting_app\gsplat-2025\examples\data\1800_eac.png")
+    eac_path = Path(r"x:\_ai\_gsplat\datasets\nerfonthego-undistorted\mountain.out\sky_eac_averaged.png")
     # equirect_path = Path(r"p:\3d_printing\_gsplat_sandbox\splatting_app\gsplat-2025\examples\data\pano4s.png")
     viewer = SphereVisualizerGUI(width=1280, height=720, use_cuda=True)
     viewer.init()
