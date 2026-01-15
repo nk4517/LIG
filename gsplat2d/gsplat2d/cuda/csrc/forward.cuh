@@ -107,8 +107,12 @@ __global__ void rasterize_forward_unified(
     const float* __restrict__ opacities,  // optional, can be nullptr
     int* __restrict__ final_index,
     float3* __restrict__ out_img,
-    float* __restrict__ out_wsum,
-    float3* __restrict__ out_dx,
-    float3* __restrict__ out_dy,
-    float3* __restrict__ out_dxy
+    float* __restrict__ out_T,  // optional, nullptr if opacities is nullptr
+    float3* __restrict__ out_img_dx,
+    float3* __restrict__ out_img_dy,
+    float3* __restrict__ out_img_dxy,
+    float* __restrict__ out_T_dx,   // nullptr if opacities is nullptr
+    float* __restrict__ out_T_dy,   // nullptr if opacities is nullptr
+    float* __restrict__ out_T_dxy,  // nullptr if opacities is nullptr
+    float* __restrict__ out_S_xy_cross  // nullptr if opacities is nullptr, needed for backward
 );

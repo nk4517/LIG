@@ -290,10 +290,14 @@ __global__ void rasterize_forward_unified(
     const float* __restrict__ opacities,
     int* __restrict__ final_index,
     float3* __restrict__ out_img,
-    float* __restrict__ out_wsum,
-    float3* __restrict__ out_dx,
-    float3* __restrict__ out_dy,
-    float3* __restrict__ out_dxy
+    float* __restrict__ out_T,
+    float3* __restrict__ out_img_dx,
+    float3* __restrict__ out_img_dy,
+    float3* __restrict__ out_img_dxy,
+    float* __restrict__ out_T_dx,
+    float* __restrict__ out_T_dy,
+    float* __restrict__ out_T_dxy,
+    float* __restrict__ out_S_xy_cross
 ) {
     auto block = cg::this_thread_block();
     int32_t tile_id =
@@ -324,10 +328,12 @@ __global__ void rasterize_forward_unified(
     int cur_idx = 0;
     int tr = block.thread_rank();
     float3 pix_out = {0.f, 0.f, 0.f};
-    float pix_wsum = 0.f;
+    float pix_T = 1.f;   // T = product of (1 - alpha)
     float3 pix_dx = {0.f, 0.f, 0.f};
     float3 pix_dy = {0.f, 0.f, 0.f};
     float3 pix_dxy = {0.f, 0.f, 0.f};
+    float pix_S_x = 0.f, pix_S_y = 0.f, pix_S_xy = 0.f;
+    float pix_S_xy_cross = 0.f;
 
     // each thread loads one gaussian at a time before rasterizing its designated pixel
     for (int b = 0; b < num_batches; ++b) {
@@ -354,11 +360,11 @@ __global__ void rasterize_forward_unified(
         for (int t = 0; (t < batch_size) && !done; ++t) {
             const float3 conic = conic_batch[t];
             const float2 xy = xy_batch[t];
-            // d = [x - μ_x, y - μ_y] (Eq. 38)
-            const float2 delta = {px - xy.x, py - xy.y};
-            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
-                                        conic.z * delta.y * delta.y) +
-                                conic.y * delta.x * delta.y;
+            // d = μ - p (classical 3DGS convention: center - pixel)
+            const float2 d = {xy.x - px, xy.y - py};
+            const float sigma = 0.5f * (conic.x * d.x * d.x +
+                                        conic.z * d.y * d.y) +
+                                conic.y * d.x * d.y;
             const float opacity = opacity_batch[t];
             const float alpha = min(0.999f, opacity * __expf(-sigma));
             if (sigma < 0.f || alpha < 1.f / 255.f) {
@@ -368,25 +374,26 @@ __global__ void rasterize_forward_unified(
             int32_t g = id_batch[t];
             const float3 c = colors[g];
             pix_out += c * alpha;
-            pix_wsum += alpha;
+            if (out_T)
+                pix_T *= (1.f - alpha);
 
             if constexpr (WITH_UPSCALE_GRADS) {
-                // First-order partial derivatives of sigma = -g (Eq. 37: g = -d^T * Σ^{-1} * d)
-                // sigma = 0.5 * d^T * conic * d, where conic = Σ^{-1}
-                // ∂sigma/∂x = conic.x * d.x + conic.y * d.y
-                // ∂sigma/∂y = conic.y * d.x + conic.z * d.y
-                const float d_sigma_dx = conic.x * delta.x + conic.y * delta.y;
-                const float d_sigma_dy = conic.y * delta.x + conic.z * delta.y;
+                // g_x, g_y = gradient of sigma w.r.t. d (not pixel!)
+                // g_x = ∂σ/∂d_x = a*d_x + b*d_y
+                // g_y = ∂σ/∂d_y = b*d_x + c*d_y
+                const float g_x = conic.x * d.x + conic.y * d.y;
+                const float g_y = conic.y * d.x + conic.z * d.y;
 
-                // ∂²sigma/∂x∂y = conic.y (the off-diagonal element of the conic matrix)
-                const float d2_sigma_dxdy = conic.y;
+                // Since d = μ - p, we have ∂d/∂p = -1, so:
+                // σ_x = ∂σ/∂p_x = g_x * (-1) = -g_x
+                // σ_y = ∂σ/∂p_y = g_y * (-1) = -g_y
+                // α_x = -α * σ_x = α * g_x
+                // α_y = -α * σ_y = α * g_y
+                const float d_alpha_dx = alpha * g_x;
+                const float d_alpha_dy = alpha * g_y;
 
-                // α = exp(-sigma) (Eq. 36), ∂α/∂x = -α * ∂sigma/∂x
-                const float d_alpha_dx = -alpha * d_sigma_dx;
-                const float d_alpha_dy = -alpha * d_sigma_dy;
-
-                // ∂²α/∂x∂y = -α * (∂²sigma/∂x∂y - ∂sigma/∂x * ∂sigma/∂y)
-                const float d2_alpha_dxdy = -alpha * (d2_sigma_dxdy - d_sigma_dx * d_sigma_dy);
+                // α_xy = α * (g_x * g_y - b), where b = conic.y
+                const float d2_alpha_dxdy = alpha * (g_x * g_y - conic.y);
 
                 // Accumulate gradients for weighted summation (simplified from Eqs. 46-49)
                 // For weighted sum: I(x,y) = Σ c_i * α_i(x,y)
@@ -396,6 +403,37 @@ __global__ void rasterize_forward_unified(
                 pix_dy += c * d_alpha_dy;
                 // ∂²I/∂x∂y = Σ c_i * ∂²α_i/∂x∂y
                 pix_dxy += c * d2_alpha_dxdy;
+
+                // ============================================================
+                // T derivatives for alpha-mask upscaling
+                // ============================================================
+                // T = Π(1-α_i)
+                // dT/dx = -T * S_x,  where S_x = Σ(dα_i/dx / (1-α_i))
+                // dT/dy = -T * S_y,  where S_y = Σ(dα_i/dy / (1-α_i))
+                //
+                // For d2T/dxdy, applying product rule to dT/dx = -T * S_x:
+                //   d2T/dxdy = -dT/dy * S_x - T * dS_x/dy
+                //            = T * S_x * S_y - T * dS_x/dy
+                //
+                // dS_x/dy = Σ d/dy(dα/dx / (1-α))
+                //         = Σ [d2α/dxdy/(1-α) + (dα/dx * dα/dy)/(1-α)²]
+                //         = S_xy + S_xy_cross
+                //
+                // Therefore: d2T/dxdy = T * (S_x * S_y - S_xy - S_xy_cross)
+                //
+                // S_xy_cross is needed for correct backward pass when training
+                // alpha masks with upscale gradients. Without it, backward
+                // cannot recover S_xy from stored T derivatives.
+                //
+                // Without upscaled alpha loss, v_T_dxy = 0 and S_xy_cross
+                // has no effect on gradients.
+                if (out_T_dx) {
+                    float one_minus_alpha = 1.f - alpha;
+                    pix_S_x += d_alpha_dx / one_minus_alpha;
+                    pix_S_y += d_alpha_dy / one_minus_alpha;
+                    pix_S_xy += d2_alpha_dxdy / one_minus_alpha;
+                    pix_S_xy_cross += (d_alpha_dx * d_alpha_dy) / (one_minus_alpha * one_minus_alpha);
+                }
             }
 
             cur_idx = batch_start + t;
@@ -405,11 +443,18 @@ __global__ void rasterize_forward_unified(
     if (inside) {
         final_index[pix_id] = cur_idx;
         out_img[pix_id] = pix_out;
-        out_wsum[pix_id] = pix_wsum;
+        if (out_T)
+            out_T[pix_id] = pix_T;
         if constexpr (WITH_UPSCALE_GRADS) {
-            out_dx[pix_id] = pix_dx;
-            out_dy[pix_id] = pix_dy;
-            out_dxy[pix_id] = pix_dxy;
+            out_img_dx[pix_id] = pix_dx;
+            out_img_dy[pix_id] = pix_dy;
+            out_img_dxy[pix_id] = pix_dxy;
+            if (out_T_dx) {
+                out_T_dx[pix_id] = -pix_T * pix_S_x;
+                out_T_dy[pix_id] = -pix_T * pix_S_y;
+                out_T_dxy[pix_id] = pix_T * (pix_S_x * pix_S_y - pix_S_xy - pix_S_xy_cross);
+                out_S_xy_cross[pix_id] = pix_S_xy_cross;
+            }
         }
     }
 }
@@ -417,11 +462,13 @@ __global__ void rasterize_forward_unified(
 template __global__ void rasterize_forward_unified<false>(
     const dim3, const dim3, const int32_t* __restrict__, const int2* __restrict__,
     const float2* __restrict__, const float3* __restrict__, const float3* __restrict__,
-    const float* __restrict__, int* __restrict__, float3* __restrict__,
-    float* __restrict__, float3* __restrict__, float3* __restrict__, float3* __restrict__);
+    const float* __restrict__, int* __restrict__, float3* __restrict__, float* __restrict__,
+    float3* __restrict__, float3* __restrict__, float3* __restrict__,
+    float* __restrict__, float* __restrict__, float* __restrict__, float* __restrict__);
 
 template __global__ void rasterize_forward_unified<true>(
     const dim3, const dim3, const int32_t* __restrict__, const int2* __restrict__,
     const float2* __restrict__, const float3* __restrict__, const float3* __restrict__,
-    const float* __restrict__, int* __restrict__, float3* __restrict__,
-    float* __restrict__, float3* __restrict__, float3* __restrict__, float3* __restrict__);
+    const float* __restrict__, int* __restrict__, float3* __restrict__, float* __restrict__,
+    float3* __restrict__, float3* __restrict__, float3* __restrict__,
+    float* __restrict__, float* __restrict__, float* __restrict__, float* __restrict__);
